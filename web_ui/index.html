@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0e0e1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Лада — панель</title>
+<link rel="stylesheet" href="/ui/css/style.css">
+</head>
+<body>
+
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+<aside class="sidebar" id="sidebar">
+    <div class="logo">🧠 <span>Лада</span></div>
+    <button class="nav-btn active" data-tab="dashboard">📊 Дашборд</button>
+    <button class="nav-btn" data-tab="soul">⚖️ Душа</button>
+    <button class="nav-btn" data-tab="thoughts">💭 Мысли</button>
+    <button class="nav-btn" data-tab="reflections">🪞 Рефлексии</button>
+    <button class="nav-btn" data-tab="observations">👁 Наблюдения</button>
+    <button class="nav-btn" id="queue-nav" data-tab="queue">📬 Очередь<span class="badge" id="queue-badge" style="display:none">0</span></button>
+    <button class="nav-btn" data-tab="dialogs">📜 Переписки</button>
+    <button class="nav-btn" data-tab="trust">🔐 Доверие</button>
+    <button class="nav-btn" data-tab="chat">💬 Чат</button>
+</aside>
+
+<main class="main">
+    <div class="header">
+        <button class="burger" id="burger" onclick="toggleSidebar()" aria-label="Меню">
+            <span></span><span></span><span></span>
+        </button>
+        <h1 id="tab-title">Дашборд</h1>
+        <div class="status" id="header-status">—</div>
+    </div>
+    <div class="content" id="content"></div>
+</main>
+
+<script src="/ui/js/core.js"></script>
+<script src="/ui/js/pages/dashboard.js"></script>
+<script src="/ui/js/pages/soul.js"></script>
+<script src="/ui/js/pages/thoughts.js"></script>
+<script src="/ui/js/pages/reflections.js"></script>
+<script src="/ui/js/pages/observations.js"></script>
+<script src="/ui/js/pages/queue.js"></script>
+<script src="/ui/js/pages/dialogs.js"></script>
+<script src="/ui/js/pages/trust.js"></script>
+<script src="/ui/js/pages/chat.js"></script>
+<script>initApp();</script>
+
+</body>
+</html>

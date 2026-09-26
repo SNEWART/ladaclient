@@ -1,0 +1,7 @@
+telethon
+ollama
+watchdog
+faiss-cpu
+faster-whisper
+numpy
+pillow

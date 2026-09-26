@@ -1,0 +1,329 @@
+# web.py — веб-интерфейс управления Ладой
+
+import asyncio
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from config import MODEL, OWNER_ID
+from lada.core.persona import get_persona
+from lada.core.faiss_memory import faiss_mem
+from lada.core.memory import get_history, add_message, _user_file, list_users
+from lada.core import users_names
+from lada.core.llm import ask
+from lada.telegram.mode import get_mode, set_mode
+from lada.brain.monologue import think_once
+from lada.brain.reflection import reflect
+from lada.brain.sleep import consolidate
+from lada.brain import sins, mood
+from lada.brain import image_policy
+
+
+app = FastAPI(title="Lada")
+
+WEB_CHAT_USER_ID = 999999999
+VIEW_USER_ID = OWNER_ID
+WEB_UI_DIR = Path("web_ui")
+
+if WEB_UI_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=str(WEB_UI_DIR)), name="ui")
+
+
+# ─────────────── Модели запросов ───────────────
+
+class ChatRequest(BaseModel):
+    message: str
+
+class RemoveRequest(BaseModel):
+    index: int
+
+class ModeRequest(BaseModel):
+    mode: str
+
+class TrustRequest(BaseModel):
+    user_id: int
+    trust: float | None = None
+    intimacy: float | None = None
+
+class MaxLevelRequest(BaseModel):
+    user_id: int
+    max_level: int | None = None
+
+class StatusRequest(BaseModel):
+    user_id: int
+    status: str  # neutral | acquaintance | lover | husband
+
+
+# ─────────────── UI ───────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    f = WEB_UI_DIR / "index.html"
+    if f.exists():
+        return f.read_text(encoding="utf-8")
+    return "<h1>web_ui/index.html не найден</h1>"
+
+
+# ─────────────── Статус ───────────────
+
+@app.get("/api/status")
+async def status():
+    return {
+        "model": MODEL,
+        "mode": get_mode(),
+        "persona_size": len(get_persona()),
+        "faiss": {
+            "total": faiss_mem.count(),
+            "emotion": faiss_mem.count_by_category("emotion", VIEW_USER_ID),
+            "observation": faiss_mem.count_by_category("observation", VIEW_USER_ID),
+            "reflection": faiss_mem.count_by_category("reflection", None),
+            "monologue": faiss_mem.count_by_category("monologue", None),
+        },
+        "users": faiss_mem.list_users(),
+        "mood": mood.get_mood(),
+        "time": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+@app.get("/api/soul")
+async def soul():
+    return {"mood": mood.get_mood(), "sins": sins.get_state()}
+
+
+# ─────────────── Мысли / Рефлексии / Наблюдения ───────────────
+
+@app.get("/api/thoughts")
+async def thoughts():
+    items = [m for m in faiss_mem.metadata if m.get("category") == "monologue"][-20:]
+    items.reverse()
+    return [
+        {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
+        for m in items
+    ]
+
+
+@app.get("/api/reflections")
+async def reflections():
+    items = [m for m in faiss_mem.metadata if m.get("category") == "reflection"][-20:]
+    items.reverse()
+    return [
+        {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
+        for m in items
+    ]
+
+
+@app.get("/api/observations")
+async def observations():
+    items = [
+        m for m in faiss_mem.metadata
+        if m.get("category") == "observation" and m.get("user_id") == VIEW_USER_ID
+    ][-50:]
+    items.reverse()
+    return [
+        {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
+        for m in items
+    ]
+
+
+# ─────────────── Режим ───────────────
+
+@app.post("/api/mode")
+async def mode_set(req: ModeRequest):
+    if req.mode not in ("all", "owner"):
+        raise HTTPException(400, "Неверный режим")
+    set_mode(req.mode)
+    return {"ok": True, "mode": req.mode}
+
+
+# ─────────────── Ручные действия ───────────────
+
+@app.post("/api/think")
+async def do_think():
+    text = await think_once()
+    return {"text": text or "Пусто."}
+
+
+@app.post("/api/reflect")
+async def do_reflect():
+    await reflect()
+    return {"ok": True}
+
+
+@app.post("/api/sleep")
+async def do_sleep():
+    result = await consolidate()
+    return {"result": result}
+
+
+# ─────────────── Очередь ───────────────
+
+@app.get("/api/queue")
+async def queue_list():
+    import main
+    return {"size": main.message_queue.size(), "items": main.message_queue.snapshot()}
+
+
+@app.post("/api/queue/remove")
+async def queue_remove(req: RemoveRequest):
+    import main
+    ok = await main.message_queue.remove_at(req.index)
+    if not ok:
+        raise HTTPException(404, "Не найдено")
+    return {"ok": True}
+
+
+@app.post("/api/queue/clear")
+async def queue_clear():
+    import main
+    n = await main.message_queue.clear()
+    return {"ok": True, "removed": n}
+
+
+# ─────────────── Имена пользователей ───────────────
+
+@app.get("/api/users_names")
+async def users_names_api():
+    return users_names.all_names()
+
+
+# ─────────────── Доверие ───────────────
+
+@app.get("/api/trust")
+async def trust_list():
+    from lada.brain.relationship import familiarity, get_status, get_status_label, get_pending
+    result = []
+    for uid in list_users():
+        result.append({
+            "user_id": uid,
+            "display_name": users_names.display_name(uid),
+            "familiarity": round(familiarity(uid), 2),
+            "trust": round(image_policy.get_trust(uid), 2),
+            "intimacy": round(image_policy.get_intimacy(uid), 2),
+            "max_level": image_policy._max_level_for_user(uid),
+            "effective_max": image_policy.effective_max_level(uid),
+            "max_level_override": image_policy.get_max_level_override(uid),
+            "mood": mood.get_mood(),
+            "is_owner": uid == OWNER_ID,
+            "status": get_status(uid),
+            "status_label": get_status_label(uid),
+            "pending": get_pending(uid),
+        })
+    result.sort(key=lambda x: x["trust"], reverse=True)
+    return result
+
+
+@app.post("/api/trust/set")
+async def trust_set(req: TrustRequest):
+    image_policy.set_trust(req.user_id, trust=req.trust, intimacy=req.intimacy)
+    return {"ok": True}
+
+
+@app.post("/api/trust/max_level")
+async def trust_max_level(req: MaxLevelRequest):
+    image_policy.set_max_level_override(req.user_id, req.max_level)
+    return {"ok": True}
+
+
+@app.post("/api/trust/status")
+async def trust_status(req: StatusRequest):
+    from lada.brain.relationship import set_status, STATUS_ORDER
+    if req.status not in STATUS_ORDER:
+        raise HTTPException(400, f"Статус должен быть один из: {STATUS_ORDER}")
+    set_status(req.user_id, req.status, note="manual via web panel")
+    return {"ok": True, "status": req.status}
+
+
+@app.get("/api/trust/levels")
+async def trust_levels():
+    return {
+        "labels": image_policy.LEVEL_LABELS,
+        "keywords": {str(k): v for k, v in image_policy.LEVEL_KEYWORDS.items()},
+    }
+
+
+# ─────────────── Переписки ───────────────
+
+@app.get("/api/dialogs")
+async def dialogs_list():
+    users = list_users()
+    out = []
+    for uid in users:
+        history = get_history(uid)
+        if not history:
+            continue
+        last = history[-1]
+        out.append({
+            "user_id": uid,
+            "display_name": users_names.display_name(uid),
+            "raw": users_names.get(uid),
+            "messages_count": len(history),
+            "last_time": last.get("timestamp", "")[:19].replace("T", " "),
+            "last_text": last.get("content", "")[:120],
+            "last_role": last.get("role", "?"),
+        })
+    out.sort(key=lambda x: x["last_time"], reverse=True)
+    return out
+
+
+@app.get("/api/dialogs/{user_id}")
+async def dialog_get(user_id: int, limit: int = 200):
+    history = get_history(user_id)
+    return [
+        {
+            "role": m["role"],
+            "content": m["content"],
+            "timestamp": m.get("timestamp", "")[:19].replace("T", " "),
+        }
+        for m in history[-limit:]
+    ]
+
+
+@app.post("/api/dialogs/{user_id}/clear")
+async def dialog_clear(user_id: int):
+    f = _user_file(user_id)
+    if f.exists():
+        f.unlink()
+    return {"ok": True}
+
+
+# ─────────────── Веб-чат ───────────────
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(400, "Пустое сообщение")
+
+    uid = WEB_CHAT_USER_ID
+    add_message(uid, "user", message, max_history=20)
+    history = get_history(uid, limit=20)
+
+    related = faiss_mem.search(message, k=5, user_id=uid)
+    related = [r for r in related if r.get("category") != "emotion"][:5]
+    if related:
+        kt = "\n".join(f"- {k['text'][:200]}" for k in related)
+        history = history + [{"role": "system", "content": f"Вот что ты уже знаешь:\n{kt}"}]
+
+    content, thinking = await asyncio.to_thread(ask, history)
+    reply = content or thinking or "…"
+
+    add_message(uid, "assistant", reply, max_history=20)
+    return {"reply": reply}
+
+
+@app.get("/api/chat/history")
+async def chat_history():
+    history = get_history(WEB_CHAT_USER_ID, limit=50)
+    return [{"role": m["role"], "content": m["content"]} for m in history]
+
+
+@app.post("/api/chat/clear")
+async def chat_clear():
+    f = _user_file(WEB_CHAT_USER_ID)
+    if f.exists():
+        f.unlink()
+    return {"ok": True}
