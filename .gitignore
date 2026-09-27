@@ -151,3 +151,4 @@ ladamodel/Modelfile
 ladamodel/Qwen2.5-7B-Instruct-heretic-Q5_K_M.gguf
 /ladamodel
 /ladamodel
+whisper-base/model.bin
