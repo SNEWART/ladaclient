@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Лада — панель</title>
-<link rel="stylesheet" href="/ui/css/style.css">
+<link rel="stylesheet" href="/ui/css/style.css?v=6">
 </head>
 <body>
 
@@ -19,10 +19,8 @@
     <button class="nav-btn" data-tab="soul">⚖️ Душа</button>
     <button class="nav-btn" data-tab="thoughts">💭 Мысли</button>
     <button class="nav-btn" data-tab="reflections">🪞 Рефлексии</button>
-    <button class="nav-btn" data-tab="observations">👁 Наблюдения</button>
     <button class="nav-btn" id="queue-nav" data-tab="queue">📬 Очередь<span class="badge" id="queue-badge" style="display:none">0</span></button>
-    <button class="nav-btn" data-tab="dialogs">📜 Переписки</button>
-    <button class="nav-btn" data-tab="trust">🔐 Доверие</button>
+    <button class="nav-btn" data-tab="users">👥 Пользователи</button>
     <button class="nav-btn" data-tab="chat">💬 Чат</button>
 </aside>
 
@@ -37,16 +35,15 @@
     <div class="content" id="content"></div>
 </main>
 
-<script src="/ui/js/core.js"></script>
-<script src="/ui/js/pages/dashboard.js"></script>
-<script src="/ui/js/pages/soul.js"></script>
-<script src="/ui/js/pages/thoughts.js"></script>
-<script src="/ui/js/pages/reflections.js"></script>
-<script src="/ui/js/pages/observations.js"></script>
-<script src="/ui/js/pages/queue.js"></script>
-<script src="/ui/js/pages/dialogs.js"></script>
-<script src="/ui/js/pages/trust.js"></script>
-<script src="/ui/js/pages/chat.js"></script>
+<script src="/ui/js/core.js?v=6"></script>
+<script src="/ui/js/pages/dashboard.js?v=6"></script>
+<script src="/ui/js/pages/soul.js?v=6"></script>
+<script src="/ui/js/pages/thoughts.js?v=6"></script>
+<script src="/ui/js/pages/reflections.js?v=6"></script>
+<script src="/ui/js/pages/queue.js?v=6"></script>
+<script src="/ui/js/pages/users.js?v=6"></script>
+<script src="/ui/js/pages/user_profile.js?v=6"></script>
+<script src="/ui/js/pages/chat.js?v=6"></script>
 <script>initApp();</script>
 
 </body>

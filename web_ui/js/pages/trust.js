@@ -28,12 +28,6 @@ registerPage('trust', {
                 <button class="btn" onclick="loadTrusts()">🔄 Обновить</button>
             </div>
             <div id="trust-list"><div class="empty">Загрузка...</div></div>
-            <div class="modal-overlay" id="profile-modal" onclick="closeProfileModal(event)">
-                <div class="modal-window" onclick="event.stopPropagation()">
-                    <button class="modal-close" onclick="closeProfileModal()">✕</button>
-                    <div id="profile-content"><div class="empty">Загрузка...</div></div>
-                </div>
-            </div>
         `;
         await loadTrusts();
     },
@@ -154,7 +148,6 @@ function renderTrustItem(it) {
             </div>
 
             <div class="actions-row">
-                <button class="btn" onclick="openUserProfile(${it.user_id})">📋 Профиль</button>
                 <button class="btn primary" onclick="saveTrust(${it.user_id})">💾 Сохранить</button>
             </div>
         </div>
@@ -238,141 +231,4 @@ async function setUserStatus(uid, status) {
     } catch (e) {
         alert('Ошибка: ' + e.message);
     }
-}
-
-
-// ─────────────── ПРОФИЛЬ ───────────────
-
-async function openUserProfile(uid) {
-    const modal = document.getElementById('profile-modal');
-    const box = document.getElementById('profile-content');
-    modal.classList.add('open');
-    box.innerHTML = '<div class="empty">Загрузка профиля...</div>';
-
-    try {
-        const p = await api(`/api/user/${uid}/profile`);
-        box.innerHTML = renderProfile(p);
-    } catch (e) {
-        box.innerHTML = `<div class="empty">Ошибка: ${escapeHtml(e.message)}</div>`;
-    }
-}
-
-function closeProfileModal(event) {
-    if (event && event.target && event.target.id !== 'profile-modal') return;
-    document.getElementById('profile-modal').classList.remove('open');
-}
-
-function renderProfile(p) {
-    const raw = p.raw || {};
-    const subParts = [];
-    if (raw.username) subParts.push('@' + raw.username);
-    if (raw.first_name) subParts.push(raw.first_name);
-    if (raw.last_name) subParts.push(raw.last_name);
-    if (raw.phone) subParts.push('тел: ' + raw.phone);
-    const subtitle = subParts.join(' · ');
-
-    const ownerBadge = p.is_owner ? '<span class="badge-owner">владелец</span>' : '';
-    const pendingBadge = p.pending
-        ? `<span class="badge-pending">💗 ждёт ответа: ${STATUS_LABELS[p.pending] || p.pending}</span>`
-        : '';
-    const capBadge = p.global_cap !== null && p.global_cap !== undefined
-        ? `<span class="badge-pending">🌐 global cap ${p.global_cap}/9</span>`
-        : '';
-    const overrideBadge = p.max_level_override !== null && p.max_level_override !== undefined
-        ? `<span class="badge-owner">override ${p.max_level_override}/9</span>`
-        : '';
-
-    return `
-        <div class="profile-head">
-            <div class="profile-name">
-                ${escapeHtml(p.display_name)} ${ownerBadge}
-            </div>
-            <div class="profile-sub">${escapeHtml(subtitle)} · ID ${p.user_id}</div>
-            <div class="profile-badges">${pendingBadge} ${capBadge} ${overrideBadge}</div>
-        </div>
-
-        <div class="profile-metrics">
-            <div class="trust-metric">
-                <div class="label">Знакомство</div>
-                <div class="value">${p.familiarity.toFixed(2)}</div>
-                <div class="sub">${escapeHtml(p.familiarity_label)}</div>
-            </div>
-            <div class="trust-metric">
-                <div class="label">Доверие</div>
-                <div class="value">${p.trust.toFixed(2)}</div>
-            </div>
-            <div class="trust-metric">
-                <div class="label">Интимность</div>
-                <div class="value">${p.intimacy.toFixed(2)}</div>
-            </div>
-            <div class="trust-metric">
-                <div class="label">Статус</div>
-                <div class="value" style="font-size:14px">${escapeHtml(p.status_label)}</div>
-            </div>
-            <div class="trust-metric">
-                <div class="label">Потолок</div>
-                <div class="value">${p.effective_max}/9</div>
-                <div class="sub">база ${p.max_level}</div>
-            </div>
-        </div>
-
-        <div class="profile-section">
-            <div class="profile-section-title">👁 Наблюдений: ${p.observations_count}</div>
-            <div class="profile-list">
-                ${p.observations.length === 0
-                    ? '<div class="empty-small">Нет записей</div>'
-                    : p.observations.slice(0, 30).map(o => `
-                        <div class="profile-list-item">
-                            <div class="ts">${o.timestamp}</div>
-                            <div class="text">${escapeHtml(o.text)}</div>
-                        </div>
-                    `).join('')}
-            </div>
-        </div>
-
-        <div class="profile-section">
-            <div class="profile-section-title">💭 Эмоций: ${p.emotions_count}</div>
-            <div class="profile-list">
-                ${p.emotions.length === 0
-                    ? '<div class="empty-small">Нет записей</div>'
-                    : p.emotions.slice(0, 30).map(o => `
-                        <div class="profile-list-item">
-                            <div class="ts">${o.timestamp}</div>
-                            <div class="text">${escapeHtml(o.text)}</div>
-                        </div>
-                    `).join('')}
-            </div>
-        </div>
-
-        <div class="profile-section">
-            <div class="profile-section-title">🖼 Фото: ${p.images_count}</div>
-            <div class="profile-list">
-                ${p.images.length === 0
-                    ? '<div class="empty-small">Нет записей</div>'
-                    : p.images.slice(0, 15).map(o => `
-                        <div class="profile-list-item">
-                            <div class="ts">${o.timestamp}</div>
-                            <div class="text">${escapeHtml(o.text)}</div>
-                        </div>
-                    `).join('')}
-            </div>
-        </div>
-
-        <div class="profile-section">
-            <div class="profile-section-title">📜 Сообщений: ${p.messages_count}</div>
-            <div class="profile-list profile-dialogs">
-                ${p.messages.length === 0
-                    ? '<div class="empty-small">Нет сообщений</div>'
-                    : p.messages.slice(-30).map(m => `
-                        <div class="profile-dialog-msg ${m.role}">
-                            <div class="who">
-                                ${m.role === 'user' ? '👤' : m.role === 'assistant' ? '🧠' : '⚙️'}
-                                <span class="ts">${m.timestamp}</span>
-                            </div>
-                            <div class="text">${escapeHtml(m.content)}</div>
-                        </div>
-                    `).join('')}
-            </div>
-        </div>
-    `;
 }

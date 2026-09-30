@@ -95,7 +95,7 @@ async def soul():
     return {"mood": mood.get_mood(), "sins": sins.get_state()}
 
 
-# ─────────────── Мысли / Рефлексии / Наблюдения ───────────────
+# ─────────────── Мысли / Рефлексии ───────────────
 
 @app.get("/api/thoughts")
 async def thoughts():
@@ -110,19 +110,6 @@ async def thoughts():
 @app.get("/api/reflections")
 async def reflections():
     items = [m for m in faiss_mem.metadata if m.get("category") == "reflection"][-20:]
-    items.reverse()
-    return [
-        {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
-        for m in items
-    ]
-
-
-@app.get("/api/observations")
-async def observations():
-    items = [
-        m for m in faiss_mem.metadata
-        if m.get("category") == "observation" and m.get("user_id") == VIEW_USER_ID
-    ][-50:]
     items.reverse()
     return [
         {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
@@ -243,6 +230,52 @@ async def trust_levels():
     }
 
 
+# ─────────────── СПИСОК ПОЛЬЗОВАТЕЛЕЙ ───────────────
+
+@app.get("/api/users/list")
+async def users_list():
+    from lada.brain.relationship import (
+        familiarity, get_status_label, get_pending,
+    )
+    result = []
+    for uid in list_users():
+        history = get_history(uid)
+        obs_count = sum(
+            1 for m in faiss_mem.metadata
+            if m.get("category") == "observation" and m.get("user_id") == uid
+        )
+        emo_count = sum(
+            1 for m in faiss_mem.metadata
+            if m.get("category") == "emotion" and m.get("user_id") == uid
+        )
+        img_count = sum(
+            1 for m in faiss_mem.metadata
+            if m.get("category") == "image" and m.get("user_id") == uid
+        )
+        last_time = ""
+        if history:
+            last_time = (history[-1].get("timestamp", "") or "")[:19].replace("T", " ")
+
+        result.append({
+            "user_id": uid,
+            "display_name": users_names.display_name(uid),
+            "raw": users_names.get(uid),
+            "trust": round(image_policy.get_trust(uid), 2),
+            "intimacy": round(image_policy.get_intimacy(uid), 2),
+            "familiarity": round(familiarity(uid), 2),
+            "status_label": get_status_label(uid),
+            "pending": get_pending(uid),
+            "is_owner": uid == OWNER_ID,
+            "observations_count": obs_count,
+            "emotions_count": emo_count,
+            "images_count": img_count,
+            "messages_count": len(history),
+            "last_time": last_time,
+        })
+    result.sort(key=lambda x: x["last_time"] or "", reverse=True)
+    return result
+
+
 # ─────────────── ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ───────────────
 
 @app.get("/api/user/{user_id}/profile")
@@ -252,27 +285,30 @@ async def user_profile(user_id: int):
         get_global_cap, get_pending,
     )
 
-    # ─── Основное ───
+    # ─── Все числовые поля, которые ждёт фронт ───
     profile = {
         "user_id": user_id,
         "display_name": users_names.display_name(user_id),
         "raw": users_names.get(user_id),
         "is_owner": user_id == OWNER_ID,
+
+        # числа
         "familiarity": round(familiarity(user_id), 3),
-        "familiarity_label": familiarity_label(user_id),
         "trust": round(image_policy.get_trust(user_id), 3),
         "intimacy": round(image_policy.get_intimacy(user_id), 3),
         "max_level": image_policy._max_level_for_user(user_id),
         "effective_max": image_policy.effective_max_level(user_id),
         "max_level_override": image_policy.get_max_level_override(user_id),
+
+        # строки / статусы
+        "familiarity_label": familiarity_label(user_id),
         "status": get_status(user_id),
         "status_label": get_status_label(user_id),
         "global_cap": get_global_cap(user_id),
         "pending": get_pending(user_id),
     }
 
-    # ─── Записи из FAISS ───
-    def _collect(category: str, limit: int | None = None):
+    def _collect(category: str):
         items = [
             {
                 "text": m.get("text", ""),
@@ -281,9 +317,7 @@ async def user_profile(user_id: int):
             for m in faiss_mem.metadata
             if m.get("category") == category and m.get("user_id") == user_id
         ]
-        items.reverse()  # свежие сверху
-        if limit:
-            items = items[:limit]
+        items.reverse()
         return items
 
     observations = _collect("observation")
@@ -298,7 +332,6 @@ async def user_profile(user_id: int):
     profile["emotions_count"] = len(emotions)
     profile["images_count"] = len(images)
 
-    # ─── История диалога ───
     history = get_history(user_id)
     messages = [
         {
