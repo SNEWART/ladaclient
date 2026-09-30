@@ -24,11 +24,8 @@ html, body {
     overflow: hidden;
 }
 
-body {
-    display: flex;
-}
+body { display: flex; }
 
-/* ─── Sidebar ─── */
 .sidebar {
     width: 220px;
     background: var(--sidebar);
@@ -43,13 +40,7 @@ body {
     z-index: 200;
 }
 
-.sidebar .logo {
-    font-size: 22px;
-    font-weight: 600;
-    margin-bottom: 20px;
-    text-align: center;
-}
-
+.sidebar .logo { font-size: 22px; font-weight: 600; margin-bottom: 20px; text-align: center; }
 .sidebar .logo span { color: var(--accent); }
 
 .nav-btn {
@@ -81,13 +72,7 @@ body {
     font-weight: 600;
 }
 
-/* ─── Main ─── */
-.main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-}
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .header {
     padding: 16px 24px;
@@ -102,7 +87,6 @@ body {
 .header h1 { font-size: 18px; font-weight: 500; }
 .header .status { color: var(--muted); font-size: 13px; }
 
-/* ─── Бургер (скрыт на десктопе) ─── */
 .burger {
     display: none;
     flex-direction: column;
@@ -115,14 +99,8 @@ body {
     transition: background 0.15s;
 }
 .burger:hover { background: rgba(167,139,250,0.1); }
-.burger span {
-    width: 22px;
-    height: 2px;
-    background: var(--text);
-    border-radius: 2px;
-}
+.burger span { width: 22px; height: 2px; background: var(--text); border-radius: 2px; }
 
-/* ─── Overlay для мобилы ─── */
 .sidebar-overlay {
     display: none;
     position: fixed;
@@ -133,12 +111,8 @@ body {
     pointer-events: none;
     transition: opacity 0.25s;
 }
-.sidebar-overlay.open {
-    opacity: 1;
-    pointer-events: auto;
-}
+.sidebar-overlay.open { opacity: 1; pointer-events: auto; }
 
-/* ─── Content ─── */
 .content {
     flex: 1;
     padding: 24px;
@@ -153,31 +127,11 @@ body {
     margin-bottom: 24px;
 }
 
-.card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 18px;
-}
-.card .label {
-    color: var(--muted);
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-.card .value {
-    font-size: 26px;
-    font-weight: 600;
-    margin-top: 6px;
-    color: var(--accent);
-}
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+.card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.card .value { font-size: 26px; font-weight: 600; margin-top: 6px; color: var(--accent); }
 
-.actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 24px;
-}
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
 
 .btn {
     padding: 10px 20px;
@@ -208,13 +162,7 @@ body {
 .list-item .ts { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .list-item .text { white-space: pre-wrap; word-break: break-word; }
 
-/* ─── Чат ─── */
-.chat-box {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding-bottom: 16px;
-}
+.chat-box { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; }
 .msg {
     max-width: 78%;
     padding: 10px 16px;
@@ -223,16 +171,8 @@ body {
     word-break: break-word;
     line-height: 1.5;
 }
-.msg.user {
-    align-self: flex-end;
-    background: var(--user-bubble);
-    border-bottom-right-radius: 4px;
-}
-.msg.bot {
-    align-self: flex-start;
-    background: var(--bot-bubble);
-    border-bottom-left-radius: 4px;
-}
+.msg.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
+.msg.bot { align-self: flex-start; background: var(--bot-bubble); border-bottom-left-radius: 4px; }
 .chat-input-row {
     position: sticky;
     bottom: 0;
@@ -271,170 +211,75 @@ body {
 .chat-input-row button:hover { background: #7d6cf0; }
 .chat-input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.empty {
-    color: var(--muted);
-    text-align: center;
-    padding: 40px 20px;
-}
+.empty { color: var(--muted); text-align: center; padding: 40px 20px; }
+.empty-small { color: var(--muted); text-align: center; padding: 12px; font-size: 13px; }
 
-/* ─── Душа ─── */
-.soul-container {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    max-width: 820px;
-    margin: 0 auto;
-}
-.soul-pair {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 20px 26px;
-}
-.soul-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: 8px;
-    font-size: 17px;
-    font-weight: 500;
-}
+.soul-container { display: flex; flex-direction: column; gap: 18px; max-width: 820px; margin: 0 auto; }
+.soul-pair { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px 26px; }
+.soul-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; font-size: 17px; font-weight: 500; }
 .soul-row.sin .name { color: #ff8a8a; }
 .soul-row.sin .val  { color: #ff8a8a; font-weight: 700; font-size: 20px; }
 .soul-row.virt .name { color: #6ee7a0; }
 .soul-row.virt .val  { color: #6ee7a0; font-weight: 700; font-size: 20px; }
-.soul-bar {
-    width: 100%;
-    height: 12px;
-    background: #2c2c4a;
-    border-radius: 6px;
-    overflow: hidden;
-    margin-bottom: 18px;
-}
+.soul-bar { width: 100%; height: 12px; background: #2c2c4a; border-radius: 6px; overflow: hidden; margin-bottom: 18px; }
 .soul-bar:last-child { margin-bottom: 0; }
 .soul-bar > div { height: 100%; transition: width 0.4s; }
 .soul-bar.sin > div { background: linear-gradient(90deg, #ff6b6b, #a78bfa); }
 .soul-bar.virt > div { background: linear-gradient(90deg, #a78bfa, #4ade80); }
 
-/* ─── Очередь ─── */
 .queue-item {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 18px;
-    margin-bottom: 10px;
-    display: flex;
-    gap: 16px;
-    align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 18px; margin-bottom: 10px;
+    display: flex; gap: 16px; align-items: flex-start;
 }
 .queue-item .num {
-    background: var(--user-bubble);
-    color: white;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    flex-shrink: 0;
+    background: var(--user-bubble); color: white; width: 36px; height: 36px;
+    border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-weight: 700; flex-shrink: 0;
 }
 .queue-item .body { flex: 1; min-width: 0; }
-.queue-item .head {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-    color: var(--muted);
-    margin-bottom: 6px;
-    gap: 12px;
-}
+.queue-item .head { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 6px; gap: 12px; }
 .queue-item .user-name { color: var(--text); font-weight: 600; }
-.queue-item .text {
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--text);
-    margin-bottom: 8px;
-}
-.queue-item .right {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 8px;
-    flex-shrink: 0;
-}
+.queue-item .text { white-space: pre-wrap; word-break: break-word; color: var(--text); margin-bottom: 8px; }
+.queue-item .right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex-shrink: 0; }
 .queue-item .wait { font-size: 12px; color: var(--muted); }
 .queue-item .remove-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--danger);
-    padding: 6px 14px;
-    border-radius: 20px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    white-space: nowrap;
+    background: transparent; border: 1px solid var(--border);
+    color: var(--danger); padding: 6px 14px; border-radius: 20px;
+    cursor: pointer; font-size: 12px; font-family: inherit; white-space: nowrap;
 }
 .queue-item .remove-btn:hover { border-color: var(--danger); background: rgba(255,107,107,0.1); }
 
-/* ─── Переписки ─── */
+.exp-item {
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 10px;
+}
+.exp-item .ts { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.exp-item .text { white-space: pre-wrap; word-break: break-word; }
+
 .dialog-item {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 18px;
-    margin-bottom: 10px;
-    cursor: pointer;
-    transition: 0.15s;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 18px; margin-bottom: 10px;
+    cursor: pointer; transition: 0.15s;
 }
 .dialog-item:hover { border-color: var(--accent); background: rgba(167,139,250,0.05); }
-.dialog-item .head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-    gap: 12px;
-}
+.dialog-item .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 12px; }
 .dialog-item .user-id { font-weight: 600; color: var(--text); }
 .dialog-item .meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.dialog-item .preview {
-    color: var(--muted);
-    font-size: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+.dialog-item .preview { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dialog-item .preview .role { color: var(--accent); font-weight: 600; margin-right: 6px; }
 
 .dialog-msg {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 12px 16px;
-    margin-bottom: 8px;
-    max-width: 85%;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; max-width: 85%;
 }
-.dialog-msg.user {
-    align-self: flex-end;
-    background: rgba(108,92,231,0.15);
-    border-color: rgba(108,92,231,0.4);
-}
+.dialog-msg.user { align-self: flex-end; background: rgba(108,92,231,0.15); border-color: rgba(108,92,231,0.4); }
 .dialog-msg.assistant { align-self: flex-start; }
-.dialog-msg .who {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--muted);
-    margin-bottom: 4px;
-}
+.dialog-msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 4px; }
 .dialog-msg.user .who { color: #a78bfa; }
 .dialog-msg.assistant .who { color: #6ee7a0; }
-.dialog-msg .when {
-    font-size: 11px;
-    color: var(--muted);
-    margin-left: 8px;
-    text-transform: none;
-    letter-spacing: 0;
-}
+.dialog-msg .when { font-size: 11px; color: var(--muted); margin-left: 8px; text-transform: none; letter-spacing: 0; }
 .dialog-msg .body { white-space: pre-wrap; word-break: break-word; }
 
 /* ─── Страница «Доверие» ─── */
@@ -453,17 +298,10 @@ body {
     gap: 12px;
     flex-wrap: wrap;
 }
-.trust-item .head .name {
-    font-size: 17px;
-    font-weight: 600;
-    color: var(--text);
-}
+.trust-item .head .name { font-size: 17px; font-weight: 600; color: var(--text); }
 .trust-item .head .uid {
-    font-size: 12px;
-    color: var(--muted);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    font-size: 12px; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 8px;
 }
 .badge-owner {
     background: rgba(255, 200, 100, 0.15);
@@ -514,24 +352,9 @@ body {
 .trust-metric .value.accent { color: var(--accent); }
 .trust-metric .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
-/* ─── Статусы ─── */
-.status-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-}
-.status-row-label {
-    min-width: 100px;
-    color: var(--muted);
-    font-size: 13px;
-}
-.status-buttons {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-}
+.status-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.status-row-label { min-width: 100px; color: var(--muted); font-size: 13px; }
+.status-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
 .status-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -544,10 +367,7 @@ body {
     transition: 0.15s;
     min-height: 34px;
 }
-.status-btn:hover {
-    border-color: var(--accent);
-    color: var(--text);
-}
+.status-btn:hover { border-color: var(--accent); color: var(--text); }
 .status-btn.active {
     background: rgba(167,139,250,0.2);
     border-color: var(--accent);
@@ -555,7 +375,6 @@ body {
     font-weight: 600;
 }
 
-/* ─── Слайдеры ─── */
 .trust-slider-row {
     display: flex;
     align-items: center;
@@ -563,11 +382,7 @@ body {
     margin-bottom: 8px;
     flex-wrap: wrap;
 }
-.trust-slider-row label {
-    min-width: 100px;
-    color: var(--muted);
-    font-size: 13px;
-}
+.trust-slider-row label { min-width: 100px; color: var(--muted); font-size: 13px; }
 .trust-slider-row input[type="range"] {
     flex: 1;
     min-width: 100px;
@@ -608,7 +423,124 @@ body {
 .trust-item .actions-row {
     margin-top: 14px;
     text-align: right;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
 }
+
+/* ─── Модалка профиля ─── */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    z-index: 300;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 40px 20px;
+    overflow-y: auto;
+}
+.modal-overlay.open { display: flex; }
+
+.modal-window {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    max-width: 780px;
+    width: 100%;
+    padding: 28px;
+    position: relative;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+}
+
+.modal-close {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    transition: 0.15s;
+}
+.modal-close:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.profile-head { margin-bottom: 20px; padding-right: 40px; }
+.profile-name { font-size: 22px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.profile-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.profile-badges { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+.profile-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.profile-section { margin-bottom: 22px; }
+.profile-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.profile-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding-right: 6px;
+}
+.profile-list::-webkit-scrollbar { width: 6px; }
+.profile-list::-webkit-scrollbar-track { background: transparent; }
+.profile-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.profile-list-item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+.profile-list-item .ts {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+.profile-list-item .text { white-space: pre-wrap; word-break: break-word; }
+
+.profile-dialogs { gap: 6px; }
+.profile-dialog-msg {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+.profile-dialog-msg.user { border-left: 3px solid var(--accent); }
+.profile-dialog-msg.assistant { border-left: 3px solid #6ee7a0; }
+.profile-dialog-msg.system { border-left: 3px solid var(--muted); opacity: 0.7; }
+.profile-dialog-msg .who {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+.profile-dialog-msg .text { white-space: pre-wrap; word-break: break-word; }
 
 /* ──────────────────────────────────────── */
 /* ПЛАНШЕТ: <= 1024px                        */
@@ -622,231 +554,86 @@ body {
 /* МОБИЛА: <= 768px                          */
 /* ──────────────────────────────────────── */
 @media (max-width: 768px) {
-    body {
-        font-size: 14px;
-    }
+    body { font-size: 14px; }
 
-    /* Сайдбар выезжает слева */
     .sidebar {
         position: fixed;
-        top: 0;
-        left: 0;
-        bottom: 0;
+        top: 0; left: 0; bottom: 0;
         width: 260px;
         transform: translateX(-100%);
         box-shadow: 4px 0 20px rgba(0,0,0,0.5);
     }
-    .sidebar.open {
-        transform: translateX(0);
-    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-overlay { display: block; }
+    .burger { display: flex; }
 
-    .sidebar-overlay {
-        display: block;
-    }
+    .header { padding: 10px 14px; gap: 10px; }
+    .header h1 { font-size: 16px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .header .status { font-size: 11px; display: none; }
 
-    /* Бургер появляется */
-    .burger {
-        display: flex;
-    }
+    .content { padding: 14px; }
 
-    .header {
-        padding: 10px 14px;
-        gap: 10px;
-    }
-    .header h1 {
-        font-size: 16px;
-        flex: 1;
-        text-overflow: ellipsis;
-        overflow: hidden;
-        white-space: nowrap;
-    }
-    .header .status {
-        font-size: 11px;
-        display: none;
-    }
-    .header .status.visible {
-        display: block;
-        flex-shrink: 0;
-    }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .card { padding: 14px; }
+    .card .value { font-size: 20px; }
 
-    .content {
-        padding: 14px;
-    }
+    .actions { gap: 8px; margin-bottom: 16px; }
+    .btn { padding: 8px 16px; font-size: 13px; min-height: 38px; }
 
-    .grid {
-        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-        gap: 10px;
-        margin-bottom: 16px;
-    }
-    .card {
-        padding: 14px;
-    }
-    .card .value {
-        font-size: 20px;
-    }
+    .msg { max-width: 88%; font-size: 14px; padding: 9px 14px; }
+    .chat-input-row { padding: 12px 0; gap: 8px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+    .chat-input-row input { font-size: 16px; padding: 10px 16px; }
+    .chat-input-row button { padding: 10px 18px; font-size: 14px; }
 
-    .actions {
-        gap: 8px;
-        margin-bottom: 16px;
-    }
-    .btn {
-        padding: 8px 16px;
-        font-size: 13px;
-        min-height: 38px;
-    }
+    .trust-item { padding: 16px; border-radius: 12px; }
+    .trust-item .head .name { font-size: 15px; }
+    .trust-item .metrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .trust-metric { padding: 8px 10px; }
+    .trust-metric .value { font-size: 16px; }
+    .trust-metric .label { font-size: 10px; }
 
-    /* Чат */
-    .msg {
-        max-width: 88%;
-        font-size: 14px;
-        padding: 9px 14px;
-    }
-    .chat-input-row {
-        padding: 12px 0;
-        gap: 8px;
-        /* приподнимаем над клавиатурой на iOS */
-        padding-bottom: max(12px, env(safe-area-inset-bottom));
-    }
-    .chat-input-row input {
-        font-size: 16px; /* чтобы iOS не зумил */
-        padding: 10px 16px;
-    }
-    .chat-input-row button {
-        padding: 10px 18px;
-        font-size: 14px;
-    }
+    .status-row { gap: 8px; }
+    .status-row-label { min-width: auto; width: 100%; font-size: 12px; }
+    .status-buttons { gap: 4px; width: 100%; }
+    .status-btn { flex: 1; padding: 6px 8px; font-size: 12px; border-radius: 8px; }
 
-    /* Доверие */
-    .trust-item {
-        padding: 16px;
-        border-radius: 12px;
-    }
-    .trust-item .head .name {
-        font-size: 15px;
-    }
-    .trust-item .metrics {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 8px;
-    }
-    .trust-metric {
-        padding: 8px 10px;
-    }
-    .trust-metric .value {
-        font-size: 16px;
-    }
-    .trust-metric .label {
-        font-size: 10px;
-    }
-
-    /* Статусы — вертикально на узком экране */
-    .status-row {
-        gap: 8px;
-    }
-    .status-row-label {
-        min-width: auto;
-        width: 100%;
-        font-size: 12px;
-    }
-    .status-buttons {
-        gap: 4px;
-        width: 100%;
-    }
-    .status-btn {
-        flex: 1;
-        padding: 6px 8px;
-        font-size: 12px;
-        border-radius: 8px;
-    }
-
-    /* Слайдеры */
-    .trust-slider-row {
-        gap: 8px;
-        margin-bottom: 12px;
-    }
-    .trust-slider-row label {
-        min-width: auto;
-        width: 100%;
-        font-size: 12px;
-    }
-    .trust-slider-row input[type="range"] {
-        flex: 1;
-        min-width: 0;
-    }
-    .trust-slider-row .range-val {
-        min-width: 40px;
-        font-size: 13px;
-    }
+    .trust-slider-row { gap: 8px; margin-bottom: 12px; }
+    .trust-slider-row label { min-width: auto; width: 100%; font-size: 12px; }
+    .trust-slider-row input[type="range"] { flex: 1; min-width: 0; }
+    .trust-slider-row .range-val { min-width: 40px; font-size: 13px; }
     .trust-slider-row .range-val[style] { min-width: 130px; font-size: 11px; }
 
-    /* Душа */
-    .soul-pair {
-        padding: 16px;
-    }
-    .soul-row {
-        font-size: 15px;
-    }
-    .soul-row.sin .val,
-    .soul-row.virt .val {
-        font-size: 17px;
-    }
+    .soul-pair { padding: 16px; }
+    .soul-row { font-size: 15px; }
+    .soul-row.sin .val, .soul-row.virt .val { font-size: 17px; }
 
-    /* Очередь */
-    .queue-item {
-        padding: 12px;
-        gap: 10px;
-        flex-wrap: wrap;
-    }
-    .queue-item .num {
-        width: 30px;
-        height: 30px;
-        font-size: 13px;
-    }
-    .queue-item .right {
-        flex-direction: row;
-        align-items: center;
-        width: 100%;
-        justify-content: space-between;
-    }
+    .queue-item { padding: 12px; gap: 10px; flex-wrap: wrap; }
+    .queue-item .num { width: 30px; height: 30px; font-size: 13px; }
+    .queue-item .right { flex-direction: row; align-items: center; width: 100%; justify-content: space-between; }
 
-    /* Переписки */
-    .dialog-item {
-        padding: 12px 14px;
-    }
-    .dialog-item .head {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 4px;
-    }
-    .dialog-msg {
-        max-width: 95%;
-        padding: 10px 14px;
-    }
+    .dialog-item { padding: 12px 14px; }
+    .dialog-item .head { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .dialog-msg { max-width: 95%; padding: 10px 14px; }
 
-    /* Элементы списка */
-    .list-item {
-        padding: 12px 14px;
-    }
+    .list-item { padding: 12px 14px; }
+
+    /* Модалка на мобиле */
+    .modal-overlay { padding: 10px; }
+    .modal-window { padding: 20px 16px; border-radius: 12px; }
+    .profile-name { font-size: 18px; }
+    .profile-metrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .profile-list { max-height: 240px; }
+    .trust-item .actions-row { flex-direction: column; }
+    .trust-item .actions-row .btn { width: 100%; }
 }
 
 /* ──────────────────────────────────────── */
 /* ОЧЕНЬ УЗКАЯ МОБИЛА: <= 380px              */
 /* ──────────────────────────────────────── */
 @media (max-width: 380px) {
-    .header h1 {
-        font-size: 15px;
-    }
-    .grid {
-        grid-template-columns: 1fr;
-    }
-    .trust-item .metrics {
-        grid-template-columns: 1fr 1fr;
-        gap: 6px;
-    }
-    .status-btn {
-        font-size: 11px;
-        padding: 5px 6px;
-    }
-    .msg {
-        max-width: 92%;
-    }
+    .header h1 { font-size: 15px; }
+    .grid { grid-template-columns: 1fr; }
+    .trust-item .metrics { grid-template-columns: 1fr 1fr; gap: 6px; }
+    .status-btn { font-size: 11px; padding: 5px 6px; }
+    .msg { max-width: 92%; }
 }

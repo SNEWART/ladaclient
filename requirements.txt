@@ -5,3 +5,4 @@ faiss-cpu
 faster-whisper
 numpy
 pillow
+pytest

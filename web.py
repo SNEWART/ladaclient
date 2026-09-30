@@ -21,6 +21,7 @@ from lada.brain.reflection import reflect
 from lada.brain.sleep import consolidate
 from lada.brain import sins, mood
 from lada.brain import image_policy
+from lada.app.client import message_queue
 
 
 app = FastAPI(title="Lada")
@@ -55,7 +56,7 @@ class MaxLevelRequest(BaseModel):
 
 class StatusRequest(BaseModel):
     user_id: int
-    status: str  # neutral | acquaintance | lover | husband
+    status: str
 
 
 # ─────────────── UI ───────────────
@@ -163,14 +164,12 @@ async def do_sleep():
 
 @app.get("/api/queue")
 async def queue_list():
-    import main
-    return {"size": main.message_queue.size(), "items": main.message_queue.snapshot()}
+    return {"size": message_queue.size(), "items": message_queue.snapshot()}
 
 
 @app.post("/api/queue/remove")
 async def queue_remove(req: RemoveRequest):
-    import main
-    ok = await main.message_queue.remove_at(req.index)
+    ok = await message_queue.remove_at(req.index)
     if not ok:
         raise HTTPException(404, "Не найдено")
     return {"ok": True}
@@ -178,8 +177,7 @@ async def queue_remove(req: RemoveRequest):
 
 @app.post("/api/queue/clear")
 async def queue_clear():
-    import main
-    n = await main.message_queue.clear()
+    n = await message_queue.clear()
     return {"ok": True, "removed": n}
 
 
@@ -243,6 +241,77 @@ async def trust_levels():
         "labels": image_policy.LEVEL_LABELS,
         "keywords": {str(k): v for k, v in image_policy.LEVEL_KEYWORDS.items()},
     }
+
+
+# ─────────────── ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ───────────────
+
+@app.get("/api/user/{user_id}/profile")
+async def user_profile(user_id: int):
+    from lada.brain.relationship import (
+        familiarity, familiarity_label, get_status, get_status_label,
+        get_global_cap, get_pending,
+    )
+
+    # ─── Основное ───
+    profile = {
+        "user_id": user_id,
+        "display_name": users_names.display_name(user_id),
+        "raw": users_names.get(user_id),
+        "is_owner": user_id == OWNER_ID,
+        "familiarity": round(familiarity(user_id), 3),
+        "familiarity_label": familiarity_label(user_id),
+        "trust": round(image_policy.get_trust(user_id), 3),
+        "intimacy": round(image_policy.get_intimacy(user_id), 3),
+        "max_level": image_policy._max_level_for_user(user_id),
+        "effective_max": image_policy.effective_max_level(user_id),
+        "max_level_override": image_policy.get_max_level_override(user_id),
+        "status": get_status(user_id),
+        "status_label": get_status_label(user_id),
+        "global_cap": get_global_cap(user_id),
+        "pending": get_pending(user_id),
+    }
+
+    # ─── Записи из FAISS ───
+    def _collect(category: str, limit: int | None = None):
+        items = [
+            {
+                "text": m.get("text", ""),
+                "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " "),
+            }
+            for m in faiss_mem.metadata
+            if m.get("category") == category and m.get("user_id") == user_id
+        ]
+        items.reverse()  # свежие сверху
+        if limit:
+            items = items[:limit]
+        return items
+
+    observations = _collect("observation")
+    emotions = _collect("emotion")
+    images = _collect("image")
+
+    profile["observations"] = observations[:80]
+    profile["emotions"] = emotions[:80]
+    profile["images"] = images[:30]
+
+    profile["observations_count"] = len(observations)
+    profile["emotions_count"] = len(emotions)
+    profile["images_count"] = len(images)
+
+    # ─── История диалога ───
+    history = get_history(user_id)
+    messages = [
+        {
+            "role": m.get("role", "?"),
+            "content": m.get("content", ""),
+            "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " "),
+        }
+        for m in history
+    ]
+    profile["messages"] = messages[-100:]
+    profile["messages_count"] = len(messages)
+
+    return profile
 
 
 # ─────────────── Переписки ───────────────

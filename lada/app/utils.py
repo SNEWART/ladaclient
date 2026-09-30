@@ -1,0 +1,82 @@
+# utils.py — общие утилиты: логи, хелперы, детекторы
+
+import re
+from datetime import datetime
+
+
+def log(text: str):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {text}", flush=True)
+
+
+def log_thinking(thinking: str, limit: int = 400):
+    if not thinking:
+        return
+    t = thinking.strip()
+    if len(t) > limit:
+        t = t[:limit] + "…"
+    print(f"   🧠 thinking: {t}", flush=True)
+
+
+def has_asterisk_actions(text: str) -> bool:
+    return bool(re.search(r'\*[^*\n]{2,60}\*', text))
+
+
+def asks_for_monologue(text: str) -> bool:
+    low = text.lower()
+    markers = [
+        "расскажи сказку", "расскажи историю", "расскажи что-нибудь",
+        "расскажи мне", "продолжай без меня", "продолжи без меня",
+        "говори сам", "говори сама", "монолог", "без меня продолжай",
+        "не задавай вопросов", "просто расскажи", "развлеки меня",
+    ]
+    return any(m in low for m in markers)
+
+
+YES_MARKERS = [
+    "да", "конечно", "согласен", "согласна", "хочу", "буду",
+    "ок", "окей", "давай", "естественно", "ага", "угу",
+    "да, буду", "да, хочу", "да, согласен", "да, согласна",
+]
+
+NO_MARKERS = [
+    "нет", "не хочу", "не готов", "не готова", "не сейчас",
+    "извини, но нет", "прости, нет", "не могу", "не буду",
+    "нет, спасибо", "не для меня", "откажусь", "не надо",
+]
+
+
+def detect_yes_no(text: str) -> str | None:
+    if not text:
+        return None
+    low = text.lower().strip()
+    for m in NO_MARKERS:
+        if m in low:
+            return "no"
+    for m in YES_MARKERS:
+        if low == m or low.startswith(m + " ") or low.startswith(m + ",") \
+                or low.startswith(m + "!") or low.startswith(m + "."):
+            return "yes"
+    words = low.split()
+    if len(words) <= 3:
+        for m in YES_MARKERS:
+            if m in words:
+                return "yes"
+        for m in NO_MARKERS:
+            if m in words:
+                return "no"
+    return None
+
+
+def strip_asterisk_actions(text: str) -> tuple[str, bool]:
+    """
+    Убирает *действия* из текста. Возвращает (очищенный, было_ли_что_то).
+    """
+    if not text:
+        return text, False
+    before = text
+    text = re.sub(r'\*[^*\n]{1,80}\*', '', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+    return text, (text != before)
