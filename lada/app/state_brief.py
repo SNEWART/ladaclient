@@ -1,6 +1,7 @@
 # state_brief.py — сборка текстового состояния Лады для LLM
 
 from lada.core import user_city
+from lada.core.working_memory import as_context_block as wm_block  # NEW
 from lada.tools import weather
 from lada.brain import sins, mood, will, image_policy as ip
 from lada.brain.relationship import (
@@ -18,6 +19,13 @@ def build_state_brief(
     user_requested_photo: bool,
 ) -> str:
     lines = []
+
+    # NEW: рабочая память — самое важное, ставим в начало
+    wm = wm_block()
+    if wm:
+        lines.append(wm)
+        lines.append("")
+
     lines.append("=== ТВОЁ ТЕКУЩЕЕ СОСТОЯНИЕ ===")
 
     m = mood.get_mood()

@@ -1,12 +1,15 @@
 # web.py — веб-интерфейс управления Ладой
 
 import asyncio
+import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from config import MODEL, OWNER_ID
@@ -29,6 +32,39 @@ app = FastAPI(title="Lada")
 WEB_CHAT_USER_ID = 999999999
 VIEW_USER_ID = OWNER_ID
 WEB_UI_DIR = Path("web_ui")
+
+# ─────────────── FIX: Basic Auth ───────────────
+# Логин/пароль берутся из переменных окружения.
+# Если WEB_AUTH_USER не задан — аутентификация отключена (для локальной разработки).
+WEB_AUTH_USER = os.environ.get("WEB_AUTH_USER", "")
+WEB_AUTH_PASS = os.environ.get("WEB_AUTH_PASS", "")
+
+_security = HTTPBasic(auto_error=False)
+
+
+def _auth_required() -> bool:
+    return bool(WEB_AUTH_USER and WEB_AUTH_PASS)
+
+
+async def require_auth(credentials: HTTPBasicCredentials | None = Depends(_security)):
+    if not _auth_required():
+        return True
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется авторизация",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    user_ok = secrets.compare_digest(credentials.username, WEB_AUTH_USER)
+    pass_ok = secrets.compare_digest(credentials.password, WEB_AUTH_PASS)
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный логин или пароль",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return True
+
 
 if WEB_UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(WEB_UI_DIR)), name="ui")
@@ -62,7 +98,7 @@ class StatusRequest(BaseModel):
 # ─────────────── UI ───────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
+async def index(_: bool = Depends(require_auth)):
     f = WEB_UI_DIR / "index.html"
     if f.exists():
         return f.read_text(encoding="utf-8")
@@ -72,7 +108,7 @@ async def index():
 # ─────────────── Статус ───────────────
 
 @app.get("/api/status")
-async def status():
+async def status(_: bool = Depends(require_auth)):
     return {
         "model": MODEL,
         "mode": get_mode(),
@@ -91,14 +127,14 @@ async def status():
 
 
 @app.get("/api/soul")
-async def soul():
+async def soul(_: bool = Depends(require_auth)):
     return {"mood": mood.get_mood(), "sins": sins.get_state()}
 
 
 # ─────────────── Мысли / Рефлексии ───────────────
 
 @app.get("/api/thoughts")
-async def thoughts():
+async def thoughts(_: bool = Depends(require_auth)):
     items = [m for m in faiss_mem.metadata if m.get("category") == "monologue"][-20:]
     items.reverse()
     return [
@@ -108,7 +144,7 @@ async def thoughts():
 
 
 @app.get("/api/reflections")
-async def reflections():
+async def reflections(_: bool = Depends(require_auth)):
     items = [m for m in faiss_mem.metadata if m.get("category") == "reflection"][-20:]
     items.reverse()
     return [
@@ -117,10 +153,26 @@ async def reflections():
     ]
 
 
+# ─────────────── FIX: Наблюдения ───────────────
+
+@app.get("/api/observations")
+async def observations(_: bool = Depends(require_auth)):
+    """Свежие наблюдения о владельце (последние 50)."""
+    items = [
+        m for m in faiss_mem.metadata
+        if m.get("category") == "observation" and m.get("user_id") == VIEW_USER_ID
+    ][-50:]
+    items.reverse()
+    return [
+        {"text": m.get("text", ""), "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " ")}
+        for m in items
+    ]
+
+
 # ─────────────── Режим ───────────────
 
 @app.post("/api/mode")
-async def mode_set(req: ModeRequest):
+async def mode_set(req: ModeRequest, _: bool = Depends(require_auth)):
     if req.mode not in ("all", "owner"):
         raise HTTPException(400, "Неверный режим")
     set_mode(req.mode)
@@ -130,19 +182,19 @@ async def mode_set(req: ModeRequest):
 # ─────────────── Ручные действия ───────────────
 
 @app.post("/api/think")
-async def do_think():
+async def do_think(_: bool = Depends(require_auth)):
     text = await think_once()
     return {"text": text or "Пусто."}
 
 
 @app.post("/api/reflect")
-async def do_reflect():
+async def do_reflect(_: bool = Depends(require_auth)):
     await reflect()
     return {"ok": True}
 
 
 @app.post("/api/sleep")
-async def do_sleep():
+async def do_sleep(_: bool = Depends(require_auth)):
     result = await consolidate()
     return {"result": result}
 
@@ -150,12 +202,12 @@ async def do_sleep():
 # ─────────────── Очередь ───────────────
 
 @app.get("/api/queue")
-async def queue_list():
+async def queue_list(_: bool = Depends(require_auth)):
     return {"size": message_queue.size(), "items": message_queue.snapshot()}
 
 
 @app.post("/api/queue/remove")
-async def queue_remove(req: RemoveRequest):
+async def queue_remove(req: RemoveRequest, _: bool = Depends(require_auth)):
     ok = await message_queue.remove_at(req.index)
     if not ok:
         raise HTTPException(404, "Не найдено")
@@ -163,7 +215,7 @@ async def queue_remove(req: RemoveRequest):
 
 
 @app.post("/api/queue/clear")
-async def queue_clear():
+async def queue_clear(_: bool = Depends(require_auth)):
     n = await message_queue.clear()
     return {"ok": True, "removed": n}
 
@@ -171,14 +223,14 @@ async def queue_clear():
 # ─────────────── Имена пользователей ───────────────
 
 @app.get("/api/users_names")
-async def users_names_api():
+async def users_names_api(_: bool = Depends(require_auth)):
     return users_names.all_names()
 
 
 # ─────────────── Доверие ───────────────
 
 @app.get("/api/trust")
-async def trust_list():
+async def trust_list(_: bool = Depends(require_auth)):
     from lada.brain.relationship import familiarity, get_status, get_status_label, get_pending
     result = []
     for uid in list_users():
@@ -202,19 +254,19 @@ async def trust_list():
 
 
 @app.post("/api/trust/set")
-async def trust_set(req: TrustRequest):
+async def trust_set(req: TrustRequest, _: bool = Depends(require_auth)):
     image_policy.set_trust(req.user_id, trust=req.trust, intimacy=req.intimacy)
     return {"ok": True}
 
 
 @app.post("/api/trust/max_level")
-async def trust_max_level(req: MaxLevelRequest):
+async def trust_max_level(req: MaxLevelRequest, _: bool = Depends(require_auth)):
     image_policy.set_max_level_override(req.user_id, req.max_level)
     return {"ok": True}
 
 
 @app.post("/api/trust/status")
-async def trust_status(req: StatusRequest):
+async def trust_status(req: StatusRequest, _: bool = Depends(require_auth)):
     from lada.brain.relationship import set_status, STATUS_ORDER
     if req.status not in STATUS_ORDER:
         raise HTTPException(400, f"Статус должен быть один из: {STATUS_ORDER}")
@@ -223,7 +275,7 @@ async def trust_status(req: StatusRequest):
 
 
 @app.get("/api/trust/levels")
-async def trust_levels():
+async def trust_levels(_: bool = Depends(require_auth)):
     return {
         "labels": image_policy.LEVEL_LABELS,
         "keywords": {str(k): v for k, v in image_policy.LEVEL_KEYWORDS.items()},
@@ -233,7 +285,7 @@ async def trust_levels():
 # ─────────────── СПИСОК ПОЛЬЗОВАТЕЛЕЙ ───────────────
 
 @app.get("/api/users/list")
-async def users_list():
+async def users_list(_: bool = Depends(require_auth)):
     from lada.brain.relationship import (
         familiarity, get_status_label, get_pending,
     )
@@ -279,20 +331,18 @@ async def users_list():
 # ─────────────── ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ───────────────
 
 @app.get("/api/user/{user_id}/profile")
-async def user_profile(user_id: int):
+async def user_profile(user_id: int, _: bool = Depends(require_auth)):
     from lada.brain.relationship import (
         familiarity, familiarity_label, get_status, get_status_label,
         get_global_cap, get_pending,
     )
 
-    # ─── Все числовые поля, которые ждёт фронт ───
     profile = {
         "user_id": user_id,
         "display_name": users_names.display_name(user_id),
         "raw": users_names.get(user_id),
         "is_owner": user_id == OWNER_ID,
 
-        # числа
         "familiarity": round(familiarity(user_id), 3),
         "trust": round(image_policy.get_trust(user_id), 3),
         "intimacy": round(image_policy.get_intimacy(user_id), 3),
@@ -300,7 +350,6 @@ async def user_profile(user_id: int):
         "effective_max": image_policy.effective_max_level(user_id),
         "max_level_override": image_policy.get_max_level_override(user_id),
 
-        # строки / статусы
         "familiarity_label": familiarity_label(user_id),
         "status": get_status(user_id),
         "status_label": get_status_label(user_id),
@@ -350,7 +399,7 @@ async def user_profile(user_id: int):
 # ─────────────── Переписки ───────────────
 
 @app.get("/api/dialogs")
-async def dialogs_list():
+async def dialogs_list(_: bool = Depends(require_auth)):
     users = list_users()
     out = []
     for uid in users:
@@ -372,7 +421,7 @@ async def dialogs_list():
 
 
 @app.get("/api/dialogs/{user_id}")
-async def dialog_get(user_id: int, limit: int = 200):
+async def dialog_get(user_id: int, limit: int = 200, _: bool = Depends(require_auth)):
     history = get_history(user_id)
     return [
         {
@@ -385,7 +434,7 @@ async def dialog_get(user_id: int, limit: int = 200):
 
 
 @app.post("/api/dialogs/{user_id}/clear")
-async def dialog_clear(user_id: int):
+async def dialog_clear(user_id: int, _: bool = Depends(require_auth)):
     f = _user_file(user_id)
     if f.exists():
         f.unlink()
@@ -395,7 +444,7 @@ async def dialog_clear(user_id: int):
 # ─────────────── Веб-чат ───────────────
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, _: bool = Depends(require_auth)):
     message = req.message.strip()
     if not message:
         raise HTTPException(400, "Пустое сообщение")
@@ -418,13 +467,13 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/api/chat/history")
-async def chat_history():
+async def chat_history(_: bool = Depends(require_auth)):
     history = get_history(WEB_CHAT_USER_ID, limit=50)
     return [{"role": m["role"], "content": m["content"]} for m in history]
 
 
 @app.post("/api/chat/clear")
-async def chat_clear():
+async def chat_clear(_: bool = Depends(require_auth)):
     f = _user_file(WEB_CHAT_USER_ID)
     if f.exists():
         f.unlink()

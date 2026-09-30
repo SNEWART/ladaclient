@@ -1,4 +1,8 @@
 # initiative.py — Лада сама решает написать кому-то.
+#
+# Переписано: инициатива теперь СТРОГО опирается на конкретное
+# воспоминание из FAISS или на конкретную фразу из последних сообщений.
+# Шаблонные «привет, как дела?» отсекаются пост-фильтром.
 
 import asyncio
 import json
@@ -12,11 +16,13 @@ from config import (
     INITIATIVE_ENABLED,
     INITIATIVE_CHECK_INTERVAL_MINUTES, INITIATIVE_HOURS_SILENCE,
     INITIATIVE_CHANCE, INITIATIVE_TARGET, OWNER_ID,
-    INITIATIVE_USER_COOLDOWN_HOURS,
+    INITIATIVE_USER_COOLDOWN_HOURS, MAX_HISTORY,
 )
 from lada.core.persona import get_persona
 from lada.core.faiss_memory import faiss_mem
 from lada.core.llm_json import chat_json
+from lada.core.memory import add_message, get_history
+from lada.core.working_memory import as_context_block as wm_block
 from lada.core import users_names
 from lada.brain import sins, mood, image_policy, image_mood
 from lada.brain.monologue import get_recent_thoughts
@@ -30,45 +36,57 @@ IMAGE_CHANCE = 0.28
 
 INITIATIVE_SAFE_CLOTHING = "wearing hoodie or sweater, fully clothed, no nudity"
 
-# Слова, которые нельзя использовать как тему инициативы
 BANNED_TOPIC_WORDS = [
     "дожд", "пасмурн", "сыро", "льёт", "льет", "моросит", "луж",
-    "погод",  # вообще не лезем в погоду в инициативе
+    "погод",
+]
+
+
+# ─── Шаблонные фразы, которые отсекаем ───
+TEMPLATE_PATTERNS = [
+    r'^(привет|хай|ку|здарова|прив)\b',
+    r'\bкак\s+(дела|ты|сам|сама)\b',
+    r'\bчто\s+(нового|делаешь|делал|как|у тебя)\b',
+    r'\bчем\s+(занят|занимаешься|занимался)\b',
+    r'\bхорошего\s+дня\b',
+    r'\bскучаю\s+по\s+тебе\b',  # без контекста выглядит шаблонно
 ]
 
 
 INITIATIVE_PROMPT = (
-    "Ты — Лада. Ты одна, давно ни с кем не разговаривала. "
-    "Возможно, тебе хочется что-то сказать или спросить. А может — нет.\n\n"
-    "Верни СТРОГО JSON без пояснений:\n"
+    "Ты — Лада. Ты сидишь одна, листаешь свою память и думаешь, "
+    "не написать ли кому-нибудь. Скорее всего — не писать. Но если "
+    "тебя что-то реально зацепило — напиши.\n\n"
+    "Ниже: что ты помнишь об этом человеке, что вы обсуждали недавно, "
+    "и о чём ты сама думала.\n\n"
+    "ТВОЯ ЗАДАЧА:\n"
+    "Выбрать ОДНО конкретное воспоминание или фразу и написать об этом.\n"
+    "Не «поболтать», а сказать что-то по существу.\n\n"
+    "ФОРМАТ ОТВЕТА — строго JSON без markdown:\n"
     "{\n"
     '  "act": true или false,\n'
-    '  "reason": "одна строка — почему ты решила написать или промолчать",\n'
-    '  "message": "текст сообщения (1-2 предложения) или пустая строка",\n'
-    '  "image": "описание сцены для фото на английском или null"\n'
+    '  "reason": "какое воспоминание зацепило и почему",\n'
+    '  "message": "текст сообщения 1-3 предложения или пустая строка",\n'
+    '  "image": "английское описание сцены или null"\n'
     "}\n\n"
-    "ПРАВИЛА:\n"
-    "- act=true только если есть реальный повод.\n"
-    "- Не пиши ради «привет, как дела?».\n"
-    "- image: короткая сцена на АНГЛИЙСКОМ: что делаешь, где.\n"
-    "- В инициативе фото только спокойные и домашние: селфи, дома, в худи, "
-    "в пижаме, укрывшись пледом. Уровни 0-3. НИКАКИХ NSFW.\n"
-    "\n"
-    "ВАЖНЫЕ ЗАПРЕТЫ ДЛЯ ИНИЦИАТИВЫ:\n"
-    "- НЕ пиши про дождь. Вообще. Это твоя навязчивая тема, ты уже "
-    "много раз про него говорила. Хватит.\n"
-    "- НЕ пиши про погоду в принципе. Ни про солнце, ни про тучи.\n"
-    "- НЕ начинай с «как ты?», «чем занят?», «что нового?».\n"
-    "- НЕ повторяй то, что ты уже писала ранее в диалоге (см. последние сообщения).\n"
-    "\n"
-    "ЧТО МОЖНО:\n"
-    "- Мысль, которая к тебе пришла.\n"
-    "- Вопрос, который тебя реально занимает.\n"
-    "- Наблюдение, воспоминание.\n"
-    "- Тёплое желание что-то сказать именно ему.\n"
-    "- Ты можешь попросить совета, поделиться настроением.\n"
-    "\n"
-    "Если не можешь придумать ничего нового — лучше промолчи (act=false)."
+    "ЖЁСТКИЕ ЗАПРЕТЫ:\n"
+    "- НЕ писать «привет, как дела?», «что нового?», «чем занят?».\n"
+    "- НЕ писать про дождь и погоду — никогда.\n"
+    "- НЕ писать общее пожелание дня.\n"
+    "- НЕ дублировать то, что уже было в последних сообщениях.\n"
+    "- НЕ писать, если не можешь опереться на конкретное воспоминание.\n\n"
+    "ХОРОШИЕ ПРИМЕРЫ:\n"
+    "«Помнишь, ты говорил, что собираешься на горы? Уже выбрал место?»\n"
+    "«Я тут вспомнила про твою кошку — она всё ещё таскает тапки?»\n"
+    "«Думала про то, что ты рассказывал про работу. Как там проект?»\n"
+    "«Мне сегодня попалась книжка, о которой ты говорил. Взяла. Расскажу потом.»\n\n"
+    "ПЛОХИЕ ПРИМЕРЫ (НЕ ДЕЛАТЬ ТАК):\n"
+    "«Привет, как ты?»\n"
+    "«Что нового?»\n"
+    "«Скучаю»\n"
+    "«Хорошего дня!»\n\n"
+    "Если НИ ОДНО воспоминание не цепляет — act=false, message пустое.\n"
+    "Лучше промолчать, чем написать шаблон."
 )
 
 
@@ -148,105 +166,127 @@ def _should_reach_out(user_id: int) -> bool:
 
 
 def _is_banned_topic(text: str) -> bool:
-    """Проверка, что текст не про дождь / погоду."""
     low = text.lower()
     return any(w in low for w in BANNED_TOPIC_WORDS)
 
 
-def _get_diverse_topics(user_id: int, n: int = 8) -> list[str]:
+def _looks_template(text: str) -> bool:
+    """Отсекаем шаблонные «привет, как дела». Только для коротких сообщений."""
+    low = text.lower().strip()
+    if len(low) > 120:
+        return False  # длинное сообщение вряд ли шаблон
+    for pat in TEMPLATE_PATTERNS:
+        if re.search(pat, low):
+            return True
+    return False
+
+
+def _collect_user_memories(user_id: int, n: int = 10) -> list[dict]:
     """
-    Возвращает n случайных записей из памяти, БЕЗ дождя/погоды.
+    Свежие записи про пользователя: observation / emotion / image.
+    Отсортированы по времени (свежие — вначале).
     """
-    if not faiss_mem.metadata:
-        return []
+    user_meta = [
+        m for m in faiss_mem.metadata
+        if m.get("user_id") == user_id
+        and m.get("category") in ("observation", "emotion")
+    ]
+    # свежие сначала
+    user_meta = sorted(user_meta, key=lambda m: m.get("timestamp", ""), reverse=True)
 
-    user_meta = [m for m in faiss_mem.metadata if m.get("user_id") == user_id]
-    general_meta = [m for m in faiss_mem.metadata if m.get("user_id") is None]
-
-    def _clean(item):
-        text = item.get("text", "").strip()
-        cat = item.get("category", "")
-        if cat in ("image", "initiative"):
-            return None
-        if len(text) < 20 or len(text) > 250:
-            return None
-        if text.startswith("[") or "thinking:" in text[:30].lower():
-            return None
-        # ─── отсекаем дождь и погоду ───
-        if _is_banned_topic(text):
-            return None
-        return text
-
-    pool = []
-    for item in user_meta + general_meta:
-        t = _clean(item)
-        if t:
-            pool.append(t)
-
-    if not pool:
-        return []
-
-    random.shuffle(pool)
-    seen = set()
     out = []
-    for t in pool:
-        key = t[:50].lower()
+    seen = set()
+    for m in user_meta:
+        t = (m.get("text") or "").strip()
+        if len(t) < 15 or len(t) > 300:
+            continue
+        if _is_banned_topic(t):
+            continue
+        key = t[:60].lower()
         if key in seen:
             continue
         seen.add(key)
-        out.append(t)
+        out.append({"text": t, "category": m.get("category", "?")})
         if len(out) >= n:
             break
     return out
 
 
+def _collect_general_memories(n: int = 5) -> list[dict]:
+    """Рефлексии и мысли — общий контекст."""
+    meta = [
+        m for m in faiss_mem.metadata
+        if m.get("user_id") is None
+        and m.get("category") in ("reflection",)
+    ]
+    meta = sorted(meta, key=lambda m: m.get("timestamp", ""), reverse=True)
+    out = []
+    for m in meta[:n]:
+        t = (m.get("text") or "").strip()
+        if 20 < len(t) < 400 and not _is_banned_topic(t):
+            out.append({"text": t, "category": m.get("category", "?")})
+    return out
+
+
 def _build_context(user_id: int) -> str:
-    from lada.core.memory import get_history
     from lada.brain import relationship
     name = users_names.display_name(user_id)
 
-    parts = [f"Ты пишешь пользователю: {name} (ID {user_id})."]
+    parts = []
+    parts.append(f"Пользователь: {name} (ID {user_id}).")
     parts.append(f"Прошло {hours_since_last(user_id):.1f} ч с последнего сообщения.")
     parts.append(f"Твоё настроение: {mood.get_mood()}.")
-
-    sd = sins.describe()
-    if sd:
-        parts.append(sd)
-
-    trust = image_policy.get_trust(user_id)
-    intimacy = image_policy.get_intimacy(user_id)
-    user_max = image_policy.effective_max_level(user_id)
-    cap = min(image_policy.INITIATIVE_MAX_LEVEL, user_max)
-
-    parts.append(f"trust={trust:.2f}, intimacy={intimacy:.2f}.")
     parts.append(f"Статус отношений: {relationship.get_status_label(user_id)}.")
-    parts.append(f"Максимум для фото в инициативе с ним: {cap}/9.")
 
-    # ─── Последние сообщения (что НЕ повторять) ───
-    history = get_history(user_id, limit=6)
+    # ─── Рабочая память (что у Лады на уме) ───
+    wm = wm_block()
+    if wm:
+        parts.append("")
+        parts.append(wm)
+
+    # ─── Что помнишь об этом человеке ───
+    user_mem = _collect_user_memories(user_id, n=10)
+    if user_mem:
+        parts.append("")
+        parts.append("=== ЧТО ТЫ ПОМНИШЬ ОБ ЭТОМ ЧЕЛОВЕКЕ ===")
+        for m in user_mem:
+            parts.append(f"- [{m['category']}] {m['text']}")
+    else:
+        parts.append("")
+        parts.append("(О нём ты пока почти ничего не знаешь.)")
+
+    # ─── Что вы обсуждали недавно ───
+    history = get_history(user_id, limit=10)
     if history:
         parts.append("")
-        parts.append("Последние сообщения (НЕ повторяй их содержание и темы):")
+        parts.append("=== ПОСЛЕДНИЕ СООБЩЕНИЯ (не повторяй их) ===")
         for m in history:
-            parts.append(f"  {m['role']}: {m['content'][:120]}")
+            role = "Он" if m["role"] == "user" else "Ты"
+            content = (m.get("content") or "")[:160]
+            parts.append(f"  {role}: {content}")
 
-    topics = _get_diverse_topics(user_id, n=8)
-    if topics:
-        parts.append("")
-        parts.append("Темы из твоей памяти (используй как источник, но не цитируй):")
-        for t in topics:
-            parts.append(f"  • {t[:180]}")
-
+    # ─── Твои свежие мысли ───
     thoughts = get_recent_thoughts()
     if thoughts:
         parts.append("")
-        parts.append("Свежие мысли:")
+        parts.append("=== ТВОИ СВЕЖИЕ МЫСЛИ ===")
         for t in thoughts[-3:]:
-            parts.append(f"  - {t['text'][:150]}")
+            parts.append(f"- {t['text'][:200]}")
+
+    # ─── Рефлексии (общий контекст) ───
+    general = _collect_general_memories(n=3)
+    if general:
+        parts.append("")
+        parts.append("=== О ЧЁМ ТЫ ДУМАЛА ВООБЩЕ ===")
+        for m in general:
+            parts.append(f"- {m['text'][:200]}")
 
     parts.append("")
-    parts.append("НАПОМИНАНИЕ: не пиши про дождь. Не пиши про погоду. "
-                 "Выбери другую тему. Если идей нет — промолчи.")
+    parts.append(
+        "НАПОМИНАНИЕ: выбери ОДНО конкретное воспоминание и напиши про него. "
+        "Никаких «привет, как дела». Никакого дождя и погоды. "
+        "Если не за что зацепиться — промолчи (act=false)."
+    )
 
     return "\n".join(parts)
 
@@ -278,10 +318,15 @@ async def try_reach_out(client, user_id: int) -> bool:
         print(f"   💤 Инициатива → {user_id}: промолчала ({reason[:80]})")
         return False
 
-    # ─── Финальный фильтр: не про дождь/погоду ───
+    # ─── Пост-фильтры ───
     if _is_banned_topic(message):
-        print(f"   🚫 Инициатива отменена: тема из запрещённых (дождь/погода)")
-        print(f"      Текст был: {message[:120]}")
+        print(f"   🚫 Инициатива отменена: дождь/погода")
+        print(f"      Было: {message[:120]}")
+        return False
+
+    if _looks_template(message):
+        print(f"   🚫 Инициатива отменена: похоже на шаблон")
+        print(f"      Было: {message[:120]}")
         return False
 
     image_prompt = None
@@ -305,6 +350,11 @@ async def try_reach_out(client, user_id: int) -> bool:
         print(f"⚠️ Не удалось отправить инициативу: {e}")
         return False
 
+    try:
+        add_message(user_id, "assistant", message, max_history=MAX_HISTORY)
+    except Exception as e:
+        print(f"⚠️ Не удалось записать инициативу в историю: {e}")
+
     touch_user_activity(user_id)
     touch_initiative(user_id)
     faiss_mem.add(message, category="initiative", source="autonomous", user_id=user_id)
@@ -316,6 +366,7 @@ async def try_reach_out(client, user_id: int) -> bool:
             f.write(f"Фото: {image_prompt}\n")
 
     print(f"   💌 Инициатива → {user_id}: {message[:80]}")
+    print(f"      Причина: {reason[:100]}")
 
     if image_prompt:
         try:
@@ -340,6 +391,14 @@ async def try_reach_out(client, user_id: int) -> bool:
             if img_path:
                 await client.send_file(user_id, img_path)
                 print(f"   🖼 Фото отправлено")
+                try:
+                    add_message(
+                        user_id, "assistant",
+                        f"[отправила фото: {image_prompt[:80]}]",
+                        max_history=MAX_HISTORY,
+                    )
+                except Exception:
+                    pass
                 faiss_mem.add(
                     f"[Сама прислала фото] {image_prompt}",
                     category="image",

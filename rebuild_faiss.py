@@ -11,6 +11,7 @@
 #   python rebuild_faiss.py           # продолжить/начать
 #   python rebuild_faiss.py --reset   # сбросить прогресс и начать заново
 #   python rebuild_faiss.py --restore # принудительно восстановить metadata из backup
+#   python rebuild_faiss.py --yes     # не спрашивать подтверждения
 
 import json
 import sys
@@ -26,6 +27,7 @@ PARTIAL_INDEX = DATA_DIR / "faiss_index.partial"
 PROGRESS_FILE = DATA_DIR / "faiss_rebuild_progress.json"
 
 EMBED_BATCH = 16
+AUTO_YES = "--yes" in sys.argv
 
 
 def log(s):
@@ -93,7 +95,6 @@ def restore_metadata_from_backup(force: bool = False) -> bool:
         log("   Backup меньше текущего — не восстанавливаю.")
         return True
 
-    # Сохраняем текущий сломанный metadata на всякий случай
     if META_PATH.exists():
         broken = META_PATH.with_suffix(".json.broken")
         shutil.copy2(META_PATH, broken)
@@ -137,13 +138,11 @@ def test_embedding_speed() -> float:
         log(f"   Проверь: ollama list")
         return -1
 
-    # Второй замер — реальная скорость
     t = time.time()
     r = ollama.embed(model=EMBEDDING_MODEL, input="второй тест для замера", keep_alive="30m")
     single = time.time() - t
     log(f"  Один текст: {single:.2f} сек")
 
-    # Батч из 8
     t = time.time()
     r = ollama.embed(model=EMBEDDING_MODEL, input=["а"] * 8, keep_alive="30m")
     batch8 = time.time() - t
@@ -166,6 +165,17 @@ def save_progress(processed: int, total: int):
         json.dumps({"processed": processed, "total": total}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _fmt_time(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}с"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}м {s}с"
+    h, m = divmod(m, 60)
+    return f"{h}ч {m}м"
 
 
 def rebuild(force_reset: bool = False):
@@ -199,37 +209,34 @@ def rebuild(force_reset: bool = False):
         log(f"   Запусти: python rebuild_faiss.py --restore")
         return False
 
-    # Проверка скорости эмбеддинга
     single_speed = test_embedding_speed()
     if single_speed < 0:
         return False
 
     estimated = total * single_speed / EMBED_BATCH
     log("")
-    log(f"⏱  Оценка времени: ~{estimated/60:.1f} мин "
+    log(f"⏱  Оценка времени: ~{_fmt_time(estimated)} "
         f"({total} записей, батч {EMBED_BATCH})")
 
-    if estimated > 600:
+    if estimated > 600 and not AUTO_YES:
         log("")
         log("⚠️  ЭТО ОЧЕНЬ ДОЛГО (>10 минут).")
         log("   Скорее всего, qwen3-embedding работает через CPU.")
         log("")
         log("   Рекомендую сменить модель эмбеддингов на лёгкую:")
         log("     ollama pull bge-m3")
-        log("   И в config.py: EMBEDDING_MODEL = \"bge-m3\"")
+        log('   И в config.py: EMBEDDING_MODEL = "bge-m3"')
         log("")
         ans = input("Продолжить всё равно? [y/N]: ").strip().lower()
         if ans != "y":
             return False
 
-    # Прогресс
     progress = load_progress()
     processed = progress.get("processed", 0)
 
     import numpy as np
     import faiss
 
-    # Загружаем или создаём индекс
     index = None
     if PARTIAL_INDEX.exists() and processed > 0:
         try:
@@ -262,7 +269,6 @@ def rebuild(force_reset: bool = False):
             batch = metadata[processed:end]
             texts = [item["text"] for item in batch]
 
-            # Эмбеддинги батчем
             try:
                 resp = ollama.embed(
                     model=EMBEDDING_MODEL,
@@ -300,17 +306,17 @@ def rebuild(force_reset: bool = False):
             index.add(arr)
             processed = end
 
-            # Сохраняем прогресс каждые EMBED_BATCH
             faiss.write_index(index, str(PARTIAL_INDEX))
             save_progress(processed, total)
 
             elapsed = time.time() - start_time
             rate = processed / elapsed if elapsed > 0 else 0
             eta = (total - processed) / rate if rate > 0 else 0
+            pct = processed * 100 // total
 
-            log(f"   [{processed}/{total}] "
-                f"прошло {elapsed:.0f}с, "
-                f"осталось ~{eta:.0f}с")
+            log(f"   [{processed}/{total}] {pct}% "
+                f"прошло {_fmt_time(elapsed)}, "
+                f"осталось ~{_fmt_time(eta)}")
 
     except KeyboardInterrupt:
         log("")
@@ -324,7 +330,6 @@ def rebuild(force_reset: bool = False):
         log(f"⚠️  Обработано только {processed}/{total}. Запусти снова для продолжения.")
         return False
 
-    # Финал — переименовываем partial в основной индекс
     section("ЗАВЕРШЕНИЕ")
     if INDEX_PATH.exists():
         INDEX_PATH.unlink()
@@ -334,7 +339,6 @@ def rebuild(force_reset: bool = False):
     log(f"✅ Индекс готов: {INDEX_PATH}")
     log(f"   Записей: {index.ntotal}")
 
-    # Проверка метрики
     if hasattr(index, "metric_type"):
         mt = index.metric_type
         if mt == faiss.METRIC_INNER_PRODUCT:
@@ -342,7 +346,6 @@ def rebuild(force_reset: bool = False):
         elif mt == faiss.METRIC_L2:
             log("❌ Метрика: L2 (что-то пошло не так)")
 
-    # Быстрый тест
     section("ТЕСТ ПОИСКА")
     try:
         test_vec = ollama.embed(model=EMBEDDING_MODEL, input="привет", keep_alive="30m")
@@ -376,7 +379,6 @@ def main():
         ok = restore_metadata_from_backup(force=True)
         if not ok:
             sys.exit(1)
-        # Опционально — восстановить старый индекс
         if INDEX_PATH.exists() is False:
             log("")
             log("⚠️  Старый индекс отсутствует.")
@@ -387,7 +389,6 @@ def main():
         log("Теперь можно запустить: python rebuild_faiss.py")
         return
 
-    # Обычный запуск: сначала проверяем metadata
     section("ПРОВЕРКА METADATA")
     ok = restore_metadata_from_backup(force=False)
     if not ok:

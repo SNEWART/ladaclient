@@ -4,14 +4,27 @@ from pathlib import Path
 
 PERSONA_DIR = Path("persona")
 
-# кэш не используем — читаем при каждом запросе,
-# чтобы изменения в .md применялись мгновенно
+# FIX: файлы, которые не должны попадать в системный промпт
+EXCLUDED_FILES = {
+    "image_appearance.md",
+    "pet_appearance.md",
+}
+
 _cache = None
 _cache_mtime = 0.0
 
 
+def _iter_persona_files():
+    """Только «человеческие» .md, без служебных."""
+    for f in sorted(PERSONA_DIR.glob("*.md")):
+        if f.name in EXCLUDED_FILES:
+            continue
+        yield f
+
+
 def _get_dir_mtime() -> float:
-    """Возвращает максимальный mtime среди всех .md файлов папки persona/."""
+    """Максимальный mtime среди всех .md (включая исключённые — чтобы
+    пересборка кэша срабатывала и при их изменении)."""
     if not PERSONA_DIR.exists():
         return 0.0
     return max(
@@ -21,11 +34,6 @@ def _get_dir_mtime() -> float:
 
 
 def get_persona() -> str:
-    """
-    Возвращает склеенный system-промпт личности.
-    Файлы читаются в алфавитном порядке (01_, 02_, ... — задают порядок).
-    Кэшируется, но автоматически перечитывается при изменении файлов.
-    """
     global _cache, _cache_mtime
 
     if not PERSONA_DIR.exists():
@@ -36,7 +44,7 @@ def get_persona() -> str:
         return _cache
 
     parts = []
-    for f in sorted(PERSONA_DIR.glob("*.md")):
+    for f in _iter_persona_files():
         try:
             parts.append(f.read_text(encoding="utf-8").strip())
         except Exception as e:
@@ -48,7 +56,6 @@ def get_persona() -> str:
 
 
 def reload():
-    """Принудительно сбросить кэш."""
     global _cache, _cache_mtime
     _cache = None
     _cache_mtime = 0.0

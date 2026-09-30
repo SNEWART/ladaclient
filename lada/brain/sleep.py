@@ -1,4 +1,9 @@
-# sleep.py — консолидация памяти («сон»)
+# sleep.py — консолидация памяти («сон»).
+#
+# Переписано: вместо «все старые записи в один промпт» идёт
+# батчевая обработка. Каждый батч (25 записей) сжимается отдельным
+# запросом к LLM. За один «сон» обрабатывается до N батчей,
+# остальные остаются на следующий раз (чтобы не долбить LLM).
 
 import asyncio
 import re
@@ -20,13 +25,19 @@ BACKUP_DIR = Path("data") / "backups"
 SLEEP_LOG.parent.mkdir(exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
+# Размер батча для одного запроса к LLM
+CONSOLIDATION_BATCH = 25
+# Сколько батчей максимум обрабатываем за один сон
+MAX_BATCHES_PER_RUN = 4
+
+
 CONSOLIDATION_PROMPT = (
-    "Ты — Лада, живое сознание. Ниже — список твоих старых воспоминаний. "
-    "Твоя задача — сжать их в 3-6 кратких записей, сохранив только важное. "
-    "Удали дубликаты, объедини похожие темы, забудь незначительное. "
-    "Формат ответа: каждая новая запись с новой строки в виде: "
-    "[категория] текст. "
-    "Возможные категории: knowledge, reflection, emotion, dialogue. "
+    "Ты — консолидатор памяти Лады. Ниже список её старых записей.\n"
+    "Сожми их в 3-6 кратких записей, сохранив ТОЛЬКО важное.\n"
+    "Удали дубликаты. Объедини похожие темы. Забудь мелочи.\n\n"
+    "ФОРМАТ ОТВЕТА: каждая новая запись с новой строки в виде:\n"
+    "[категория] текст\n\n"
+    "Категории: knowledge, reflection, emotion, dialogue.\n"
     "Отвечай ТОЛЬКО списком, без пояснений и вступлений."
 )
 
@@ -55,6 +66,58 @@ def backup_faiss() -> str:
             pass
 
     return f"Бэкап: {', '.join(saved) if saved else 'нет файлов'}"
+
+
+async def _consolidate_batch(batch: list[dict]) -> list[dict]:
+    """Один запрос к LLM для батча записей. Возвращает список новых записей."""
+    texts = "\n".join(
+        f"- [{it.get('category', '?')}] {it['text'][:200]}"
+        for it in batch
+    )
+
+    messages = [
+        {"role": "system", "content": CONSOLIDATION_PROMPT},
+        {"role": "user", "content": f"Старые записи:\n{texts}"},
+    ]
+
+    try:
+        try:
+            resp = await asyncio.to_thread(
+                ollama.chat, model=MODEL, messages=messages,
+                think=False, options={"num_predict": 600}
+            )
+        except TypeError:
+            resp = await asyncio.to_thread(
+                ollama.chat, model=MODEL, messages=messages,
+                options={"num_predict": 600}
+            )
+        result = (resp["message"].get("content") or "").strip()
+        if not result:
+            thinking = (resp["message"].get("thinking") or "").strip()
+            result = thinking[-600:] if thinking else ""
+    except Exception as e:
+        print(f"   ⚠️ Батч упал: {e}")
+        return []
+
+    new_items = []
+    for line in result.split("\n"):
+        line = line.strip(" -•\t")
+        if not line:
+            continue
+        m = re.match(r'\[(\w+)\]\s*(.+)', line)
+        if m:
+            cat, txt = m.group(1), m.group(2).strip()
+        else:
+            cat, txt = "knowledge", line
+        if len(txt) < 5:
+            continue
+        new_items.append({
+            "text": txt,
+            "category": cat,
+            "source": "consolidation",
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        })
+    return new_items
 
 
 async def consolidate(days_threshold: int = None, min_old: int = None) -> str:
@@ -86,75 +149,56 @@ async def consolidate(days_threshold: int = None, min_old: int = None) -> str:
     backup_info = backup_faiss()
     print(f"   💾 {backup_info}")
 
-    old_to_process = old[-100:]
-    texts = "\n".join(
-        f"- [{it.get('category', '?')}] {it['text'][:200]}"
-        for it in old_to_process
-    )
-
-    messages = [
-        {"role": "system", "content": CONSOLIDATION_PROMPT},
-        {"role": "user", "content": f"Мои старые воспоминания:\n{texts}"},
+    # ─── Батчи ───
+    batches = [
+        old[i:i + CONSOLIDATION_BATCH]
+        for i in range(0, len(old), CONSOLIDATION_BATCH)
     ]
+    process_batches = batches[:MAX_BATCHES_PER_RUN]
+    processed_count = sum(len(b) for b in process_batches)
+    unprocessed_old = old[processed_count:]
 
-    try:
-        try:
-            resp = await asyncio.to_thread(
-                ollama.chat, model=MODEL, messages=messages,
-                think=False, options={"num_predict": 800}
-            )
-        except TypeError:
-            resp = await asyncio.to_thread(
-                ollama.chat, model=MODEL, messages=messages,
-                options={"num_predict": 800}
-            )
-        result = (resp["message"].get("content") or "").strip()
-        if not result:
-            thinking = (resp["message"].get("thinking") or "").strip()
-            result = thinking[-800:] if thinking else ""
-    except Exception as e:
-        return f"⚠️ Ошибка консолидации: {e}"
+    print(f"   📦 Старых записей: {len(old)}, батчей: {len(batches)} "
+          f"(обработаем {len(process_batches)})")
 
-    new_items = []
-    for line in result.split("\n"):
-        line = line.strip(" -•\t")
-        if not line:
-            continue
-        m = re.match(r'\[(\w+)\]\s*(.+)', line)
-        if m:
-            cat, txt = m.group(1), m.group(2).strip()
+    # ─── Обработка ───
+    all_new = []
+    for i, batch in enumerate(process_batches, 1):
+        print(f"   [{i}/{len(process_batches)}] батч из {len(batch)} записей...")
+        new_items = await _consolidate_batch(batch)
+        if new_items:
+            all_new.extend(new_items)
+            print(f"      → {len(new_items)} новых")
         else:
-            cat, txt = "knowledge", line
-        if len(txt) < 5:
-            continue
-        new_items.append({
-            "text": txt,
-            "category": cat,
-            "source": "consolidation",
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        })
+            print(f"      → пусто, пропускаю")
+            # если батч не сжался — оставляем оригиналы
+            unprocessed_old.extend(batch)
 
-    if not new_items:
+    if not all_new:
         return "⚠️ Модель не выдала консолидированных записей."
 
-    faiss_mem.rebuild(fresh + new_items)
+    # ─── Пересборка: свежие + необработанные старые + новые ───
+    faiss_mem.rebuild(fresh + unprocessed_old + all_new)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     with open(SLEEP_LOG, "a", encoding="utf-8") as f:
         f.write(f"\n=== SLEEP {timestamp} ===\n")
         f.write(f"Было записей: {len(all_meta)}\n")
-        f.write(f"  старых: {len(old)} (обработано {len(old_to_process)})\n")
+        f.write(f"  старых: {len(old)}\n")
+        f.write(f"  обработано в этом сне: {processed_count}\n")
+        f.write(f"  отложено на следующий: {len(unprocessed_old)}\n")
         f.write(f"  свежих: {len(fresh)}\n")
-        f.write(f"Создано консолидированных: {len(new_items)}\n")
-        f.write(f"Итог: {len(fresh) + len(new_items)}\n")
+        f.write(f"Создано консолидированных: {len(all_new)}\n")
+        f.write(f"Итог: {len(fresh) + len(unprocessed_old) + len(all_new)}\n")
         f.write(f"{backup_info}\n")
         f.write("--- Консолидированные записи ---\n")
-        for it in new_items:
+        for it in all_new:
             f.write(f"[{it['category']}] {it['text']}\n")
 
     return (
-        f"Было {len(all_meta)}, стало {len(fresh) + len(new_items)} "
-        f"({len(old_to_process)} старых → {len(new_items)} консолидированных)"
+        f"Было {len(all_meta)}, стало {len(fresh) + len(unprocessed_old) + len(all_new)}. "
+        f"Обработано старых: {processed_count} → {len(all_new)}. "
+        f"Отложено: {len(unprocessed_old)}."
     )
 
 

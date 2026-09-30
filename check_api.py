@@ -8,11 +8,16 @@ ENDPOINTS = [
     "/api/soul",
     "/api/thoughts",
     "/api/reflections",
-    "/api/experience",
-    "/api/memories",
     "/api/queue",
     "/api/dialogs",
     "/api/users_names",
+    "/api/users/list",
+    "/api/trust",
+    "/api/trust/levels",
+    "/api/chat/history",
+    # FIX: убраны /api/experience, /api/memories — их нет в web.py
+    # FIX: добавлены /api/observations — теперь реализован
+    "/api/observations",
 ]
 
 for ep in ENDPOINTS:

@@ -12,6 +12,7 @@ from config import (
     WEB_SEARCH_ENABLED, WEB_SEARCH_MAX_ROUNDS,
     EMOTION_ENABLED, COOLDOWN_SECONDS,
 )
+from lada.core.working_memory import update_for_dialog as wm_update  # NEW
 from lada.core import users_names, user_city
 from lada.core.llm import ask, ask_text
 from lada.core.memory import get_history, add_message
@@ -345,10 +346,12 @@ async def process_batch(batch: list[QueuedMessage]):
         )
         log(f"   🔒 Политика: {image_policy.debug_state(user_id, image_prompt)}")
         if not allowed:
+            # FIX: сохраняем сцену до обнуления, чтобы передать в explain_refusal
+            refusal_scene = image_prompt
             log(f"   🚫 Отказ политики: {reason}")
             image_prompt = None
             if not reply.strip():
-                reply = image_policy.explain_refusal(user_id, image_prompt)
+                reply = image_policy.explain_refusal(user_id, refusal_scene)
 
     if not reply.strip() and not need_sticker:
         if image_prompt:
@@ -428,7 +431,19 @@ async def process_batch(batch: list[QueuedMessage]):
             except Exception as e:
                 log(f"   ⚠️ Не удалось отправить изображение: {e}")
 
+        # ── Эмоции (в фоне) ──
     if EMOTION_ENABLED and not image_prompt:
         asyncio.create_task(evaluate_and_record(combined, reply, user_id))
     elif image_prompt:
         log("   ⏭ Эмоции пропущены (VRAM занят после генерации)")
+
+    # NEW: рабочая память — обновляем в фоне после диалога
+    async def _wm_update_later():
+        # если была генерация фото — даём SD закончить и выгрузиться
+        await asyncio.sleep(30 if image_prompt else 3)
+        try:
+            await wm_update(user_id, combined, reply, user_display)
+        except Exception as e:
+            log(f"   ⚠️ WM: {e}")
+
+    asyncio.create_task(_wm_update_later())

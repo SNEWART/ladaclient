@@ -313,12 +313,15 @@ def check_allowed(
 
 
 def explain_refusal(user_id: int, scene: str) -> str:
+    # FIX: защита от None/пустой сцены
+    if not scene:
+        return "Не могу это показать. Давай что-то другое?"
+
     level = _detect_level(scene)
     m = mood.get_mood()
     trust = get_trust(user_id)
     intimacy = get_intimacy(user_id)
 
-    # проверяем глобальный cap
     try:
         from lada.brain.relationship import get_global_cap
         if get_global_cap(user_id) is not None and level > 6:
