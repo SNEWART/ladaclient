@@ -12,11 +12,12 @@ from config import (
     WEB_SEARCH_ENABLED, WEB_SEARCH_MAX_ROUNDS,
     EMOTION_ENABLED, COOLDOWN_SECONDS,
 )
-from lada.core.working_memory import update_for_dialog as wm_update  # NEW
 from lada.core import users_names, user_city
+from lada.core import unread  # NEW
 from lada.core.llm import ask, ask_text
 from lada.core.memory import get_history, add_message
 from lada.core.faiss_memory import faiss_mem
+from lada.core.working_memory import update_for_dialog as wm_update  # NEW
 from lada.brain import mood, image_policy, image_mood, will, relationship as rel
 from lada.brain.relationship import (
     touch_first_seen, get_status, get_pending,
@@ -228,6 +229,12 @@ async def process_batch(batch: list[QueuedMessage]):
     )
     history = history + [{"role": "system", "content": brief}]
 
+    # NEW: непрочитанные (если накопились)
+    unread_block = unread.as_context_block(user_id)
+    if unread_block:
+        history = history + [{"role": "system", "content": unread_block}]
+        log(f"   ⏳ Unread-блок: {unread.count(user_id)} сообщ.")
+
     thoughts = get_recent_thoughts()
     if thoughts:
         thoughts_text = "\n".join(f"- {t['text'][:150]}" for t in thoughts)
@@ -283,14 +290,13 @@ async def process_batch(batch: list[QueuedMessage]):
     if "[SEARCH]" in reply:
         reply = "🤔 Не нашла точный ответ."
 
-    # ─── Срезаем *действия* ───
     reply, was_stripped = strip_asterisk_actions(reply)
     if was_stripped:
         log("   ✂️  Срезаны *действия* из ответа")
 
     if "[SILENCE]" in reply:
         log("   🤐 Модель решила промолчать.")
-        add_message(user_id, "assistant", "[SILENCE]", max_history=MAX_HISTORY)
+        unread.append(user_id, combined)  # NEW
         return
 
     propose_match = re.search(r'\[PROPOSE:\s*(lover|husband)\s*\]', reply)
@@ -346,7 +352,6 @@ async def process_batch(batch: list[QueuedMessage]):
         )
         log(f"   🔒 Политика: {image_policy.debug_state(user_id, image_prompt)}")
         if not allowed:
-            # FIX: сохраняем сцену до обнуления, чтобы передать в explain_refusal
             refusal_scene = image_prompt
             log(f"   🚫 Отказ политики: {reason}")
             image_prompt = None
@@ -366,6 +371,7 @@ async def process_batch(batch: list[QueuedMessage]):
             reply = await asyncio.to_thread(ask_text, history_retry)
             if not reply.strip():
                 reply = "⚠️ Что-то у меня сбой. Повтори."
+                unread.append(user_id, combined)  # NEW
 
     if image_prompt:
         log(f"   🎨 Итоговый промпт ({image_subject}): {image_prompt[:140]}")
@@ -388,6 +394,7 @@ async def process_batch(batch: list[QueuedMessage]):
         try:
             sent_msgs = await splitter.send_in_parts(client, chat_id, reply)
             log(f"✅ Ответил ({user_display}, частей: {len(sent_msgs)})")
+            unread.mark_read(user_id)  # NEW: ответила — старые непрочитанные закрыты
         except Exception as e:
             log(f"⚠️ Не удалось отправить: {e}")
 
@@ -431,15 +438,13 @@ async def process_batch(batch: list[QueuedMessage]):
             except Exception as e:
                 log(f"   ⚠️ Не удалось отправить изображение: {e}")
 
-        # ── Эмоции (в фоне) ──
     if EMOTION_ENABLED and not image_prompt:
         asyncio.create_task(evaluate_and_record(combined, reply, user_id))
     elif image_prompt:
         log("   ⏭ Эмоции пропущены (VRAM занят после генерации)")
 
-    # NEW: рабочая память — обновляем в фоне после диалога
+    # NEW: рабочая память (в фоне)
     async def _wm_update_later():
-        # если была генерация фото — даём SD закончить и выгрузиться
         await asyncio.sleep(30 if image_prompt else 3)
         try:
             await wm_update(user_id, combined, reply, user_display)

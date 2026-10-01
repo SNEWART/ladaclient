@@ -24,6 +24,7 @@ from lada.brain.reflection import reflection_loop
 from lada.brain.initiative import initiative_loop
 from lada.brain.sleep import sleep_loop
 from lada.brain.monologue import monologue_loop
+from lada.brain.return_loop import return_loop   # NEW
 from lada.telegram.presence import presence_loop
 from lada.telegram.mode import get_mode
 from lada.app.client import set_client, message_queue
@@ -95,6 +96,10 @@ async def main():
     if INITIATIVE_ENABLED:
         asyncio.create_task(initiative_loop(client))
         log(f"💌 Инициатива: проверка каждые {INITIATIVE_CHECK_INTERVAL_MINUTES} мин")
+
+        # NEW: возврат к непрочитанным
+        asyncio.create_task(return_loop(client))
+        log("↩️  Возврат к непрочитанным: проверка каждые 30 мин")
 
     asyncio.create_task(start_web())
     log(f"🌐 Веб-панель: http://localhost:{WEB_PORT}")
