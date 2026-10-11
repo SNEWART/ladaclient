@@ -6,9 +6,9 @@ from lada.app.client import message_queue, get_client
 from config import OWNER_ID
 from lada.core import users_names, user_city
 from lada.core.memory import list_users
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.telegram.mode import get_mode, set_mode
-from lada.brain import mood, sins, image_policy
+from lada.brain import mood, sins, image_policy, activity
 from lada.brain.relationship import (
     familiarity, get_status, get_status_label, get_global_cap,
     get_pending, set_status,
@@ -16,7 +16,6 @@ from lada.brain.relationship import (
 from lada.brain.sleep import consolidate
 from lada.brain.monologue import think_once
 from lada.tools import weather, image_gen
-from lada.app.client import message_queue
 
 
 async def handle_owner_command(text: str, event) -> bool:
@@ -30,7 +29,38 @@ async def handle_owner_command(text: str, event) -> bool:
             await event.respond(f"✅ Режим: **{parts[1]}**")
         else:
             current = get_mode()
-            await event.respond(f"Текущий режим: **{current}**\nИспользование: `/mode all` или `/mode owner`.")
+            await event.respond(f"Текущий режим: **{current}**\n"
+                                f"Использование: `/mode all` или `/mode owner`.")
+        return True
+
+    # 🎭 Занятие — тест и управление
+    if text.startswith("/activity"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            cur = activity.get_current()
+            if cur:
+                await event.respond(
+                    f"🎭 Сейчас Лада: _{cur.get('text', '—')}_\n"
+                    f"Период: {cur.get('period', '?')}\n"
+                    f"С: {cur.get('since', '?')}\n\n"
+                    f"Сменить: `/activity <текст>`\n"
+                    f"Случайно: `/activity roll`"
+                )
+            else:
+                await event.respond(
+                    "🎭 Занятие не установлено.\n"
+                    "Поставить: `/activity <текст>`\n"
+                    "Случайно: `/activity roll`"
+                )
+        else:
+            arg = parts[1].strip()
+            if arg == "roll":
+                new_text = activity.pick_new()
+                activity.set_current(new_text)
+                await event.respond(f"🎲 Новое занятие: _{new_text}_")
+            else:
+                activity.set_current(arg)
+                await event.respond(f"✅ Занятие: _{arg}_")
         return True
 
     if text.startswith("/city"):
@@ -318,7 +348,9 @@ async def handle_owner_command(text: str, event) -> bool:
                 city = user_city.get_city(uid)
                 city_str = f", city={city}" if city else ""
                 ovr_str = f", override={ovr}" if ovr is not None else ""
-                lines.append(f"• [{st}] {name}: trust={t:.2f}, int={i:.2f}, fam={f:.2f}, base={lvl}, eff={eff}{ovr_str}{city_str}")
+                lines.append(f"• [{st}] {name}: trust={t:.2f}, int={i:.2f}, "
+                             f"fam={f:.2f}, base={lvl}, eff={eff}"
+                             f"{ovr_str}{city_str}")
             await event.respond("\n".join(lines))
         return True
 
@@ -353,6 +385,7 @@ async def handle_owner_command(text: str, event) -> bool:
             f"   🗣 монологи: {faiss_mem.count_by_category('monologue', None)}",
             f"   🪞 рефлексии: {faiss_mem.count_by_category('reflection', None)}",
             f"💭 Настроение: {mood.get_mood()}",
+            f"🎭 Занятие: {activity.get_current_text() or '—'}",
             f"📬 Очередь: {message_queue.size()}",
         ]
         await event.respond("\n".join(lines))

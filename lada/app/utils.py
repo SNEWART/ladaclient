@@ -45,7 +45,7 @@ NO_MARKERS = [
 ]
 
 
-def detect_yes_no(text: str) -> str | None:
+def detect_yes_no(text: str):
     if not text:
         return None
     low = text.lower().strip()
@@ -67,7 +67,7 @@ def detect_yes_no(text: str) -> str | None:
     return None
 
 
-def strip_asterisk_actions(text: str) -> tuple[str, bool]:
+def strip_asterisk_actions(text: str) -> tuple:
     """
     Убирает *действия* из текста. Возвращает (очищенный, было_ли_что_то).
     """
@@ -80,3 +80,32 @@ def strip_asterisk_actions(text: str) -> tuple[str, bool]:
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
     return text, (text != before)
+
+
+def strip_question_echo(reply: str, user_msg: str) -> str:
+    """
+    Убирает эхо вопроса пользователя в начале ответа.
+    Пример: юзер "что а я ?", ответ "А ты?\nНу ты же сам сказал..." →
+    → "Ну ты же сам сказал..."
+    Работает как страховка поверх llm._strip_echo_first_line.
+    """
+    if not reply or not user_msg:
+        return reply
+
+    reply = reply.strip()
+    lines = reply.split("\n", 1)
+    first_line = lines[0].strip()
+
+    if len(first_line) > 45 or not first_line.endswith("?"):
+        return reply
+
+    user_tokens = set(re.findall(r'\w{2,}', user_msg.lower()))
+    first_tokens = set(re.findall(r'\w{2,}', first_line.lower()))
+
+    if not (user_tokens & first_tokens):
+        return reply
+
+    rest = lines[1].strip() if len(lines) > 1 else ""
+    if rest:
+        return rest
+    return reply

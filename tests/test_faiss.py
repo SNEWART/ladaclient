@@ -1,6 +1,6 @@
 # tests/test_faiss.py
 
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 
 
 def test_faiss_loaded():

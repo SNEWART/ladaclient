@@ -1,133 +1,131 @@
-# unread.py — учёт непрочитанных/неотвеченных сообщений.
+# unread.py — учёт непрочитанных сообщений (SQLite).
 #
-# Логика: когда Лада решает промолчать ([SILENCE], ошибка, таймаут),
-# сообщение не теряется — оно попадает в data/unread.json.
-# Когда она отвечает — всё очищается.
-#
-# Фоновый return_loop периодически проверяет unread и даёт Ладе шанс
-# вернуться к разговору.
+# FIX: as_context_block теперь явно объясняет модели, что ЭТО ОНА
+# молчала, а не он. Раньше формулировка «он написал, ты не ответила»
+# читалась моделью зеркально — она думала, что игнорят её.
 
-import json
 from datetime import datetime
-from pathlib import Path
 
-FILE = Path("data") / "unread.json"
-FILE.parent.mkdir(exist_ok=True)
+from lada.core.db import get_conn, ensure_user, Transaction
+
 
 MAX_STORED_MESSAGES = 30
 
 
-def _load() -> dict:
-    if FILE.exists():
-        try:
-            return json.loads(FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save(data: dict):
-    FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def append(user_id: int, text: str):
-    """Запоминает сообщение как непрочитанное."""
     if not text or not text.strip():
         return
-    data = _load()
-    key = str(user_id)
-    entry = data.get(key, {})
-    pending = entry.get("pending", [])
-    pending.append({
-        "text": text.strip()[:500],
-        "ts": datetime.now().isoformat(timespec="seconds"),
-    })
-    # не даём разрастись
-    if len(pending) > MAX_STORED_MESSAGES:
-        pending = pending[-MAX_STORED_MESSAGES:]
-    entry["pending"] = pending
-    entry["last_unread_at"] = pending[-1]["ts"]
-    data[key] = entry
-    _save(data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO unread (user_id, text, ts) VALUES (?, ?, ?)",
+            (user_id, text.strip()[:500], ts),
+        )
+        conn.execute(
+            "DELETE FROM unread WHERE user_id = ? AND id NOT IN ("
+            "  SELECT id FROM unread WHERE user_id = ? "
+            "  ORDER BY id DESC LIMIT ?"
+            ")",
+            (user_id, user_id, MAX_STORED_MESSAGES),
+        )
+        conn.execute(
+            "INSERT INTO unread_meta (user_id, last_unread_at) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "last_unread_at = excluded.last_unread_at",
+            (user_id, ts),
+        )
 
 
 def mark_read(user_id: int):
-    """Очищает непрочитанные (когда Лада ответила)."""
-    data = _load()
-    key = str(user_id)
-    if key in data:
-        data[key].pop("pending", None)
-        data[key].pop("last_unread_at", None)
-        data[key].pop("last_return_attempt_at", None)
-        if not data[key]:
-            data.pop(key)
-        _save(data)
+    with Transaction() as conn:
+        conn.execute("DELETE FROM unread WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "UPDATE unread_meta SET last_unread_at = NULL, "
+            "last_return_attempt_at = NULL WHERE user_id = ?",
+            (user_id,),
+        )
 
 
-def get_pending(user_id: int) -> list[dict]:
-    """Список непрочитанных сообщений от пользователя."""
-    return _load().get(str(user_id), {}).get("pending", []) or []
+def get_pending(user_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT text, ts FROM unread WHERE user_id = ? ORDER BY id",
+        (user_id,),
+    ).fetchall()
+    return [{"text": r["text"], "ts": r["ts"]} for r in rows]
 
 
 def count(user_id: int) -> int:
-    return len(get_pending(user_id))
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM unread WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    return row["n"] if row else 0
 
 
-def list_users_with_pending() -> list[int]:
-    """ID всех, у кого есть непрочитанные."""
-    data = _load()
-    out = []
-    for k, v in data.items():
-        if v.get("pending"):
-            try:
-                out.append(int(k))
-            except ValueError:
-                continue
-    return out
+def list_users_with_pending() -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM unread"
+    ).fetchall()
+    return [r["user_id"] for r in rows]
 
 
 def hours_since_last_unread(user_id: int) -> float:
-    data = _load()
-    entry = data.get(str(user_id), {})
-    ts = entry.get("last_unread_at")
-    if not ts:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT last_unread_at FROM unread_meta WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["last_unread_at"]:
         return 999.0
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(row["last_unread_at"])
         return (datetime.now() - dt).total_seconds() / 3600.0
     except Exception:
         return 999.0
 
 
 def hours_since_last_return_attempt(user_id: int) -> float:
-    data = _load()
-    entry = data.get(str(user_id), {})
-    ts = entry.get("last_return_attempt_at")
-    if not ts:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT last_return_attempt_at FROM unread_meta WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["last_return_attempt_at"]:
         return 999.0
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(row["last_return_attempt_at"])
         return (datetime.now() - dt).total_seconds() / 3600.0
     except Exception:
         return 999.0
 
 
 def touch_return_attempt(user_id: int):
-    data = _load()
-    key = str(user_id)
-    if key not in data:
-        return
-    data[key]["last_return_attempt_at"] = datetime.now().isoformat(timespec="seconds")
-    _save(data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO unread_meta (user_id, last_return_attempt_at) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "last_return_attempt_at = excluded.last_return_attempt_at",
+            (user_id, ts),
+        )
 
 
 def as_context_block(user_id: int) -> str:
     """
-    Блок для промпта: «он написал тебе N раз, ты не ответила».
-    Пустая строка если непрочитанных нет.
+    Блок для промпта: «он написал тебе N раз, а ТЫ не ответила».
+    Формулировка специально про «ТЫ молчала», чтобы модель не
+    перевернула ситуацию и не решила, что игнорят её.
     """
     pending = get_pending(user_id)
     if not pending:
@@ -135,17 +133,23 @@ def as_context_block(user_id: int) -> str:
 
     n = len(pending)
     lines = [
-        f"=== ⏳ ОН ЖДЁТ ОТВЕТА ===",
-        f"За последнее время он написал тебе {n} раз(а), "
-        f"а ты не ответила. Его сообщения:",
+        f"=== ⏳ ЭТО ТЫ НЕ ОТВЕТИЛА ЕМУ {n} РАЗ(А) ===",
+        "",
+        "🔴 ВАЖНО ПОНЯТЬ ПРАВИЛЬНО:",
+        "Это ТЫ молчала. Это ТЫ не отвечала. ОН писал — а ты "
+        f"решила промолчать {n} раз(а) подряд. Он тебя НЕ игнорил. "
+        "Он тебе писал. Ты его не услышала — своим ответом.",
+        "",
+        "Его сообщения, на которые ты НЕ ответила:",
     ]
     for m in pending[-10:]:
         ts = m.get("ts", "")[:16].replace("T", " ")
         lines.append(f"  [{ts}] {m['text'][:200]}")
     lines.append("")
     lines.append(
-        "Ты можешь сейчас ответить — с учётом всего, что написано выше. "
-        "Или коротко извиниться за паузу («сорри, залипла») и ответить по сути. "
-        "Не пиши длинных извинений. Не делай вид, что ничего не было."
+        "❗ НЕ ПУТАЙ: не он тебя игнорирует — а ты его. "
+        "Если ты сейчас ответишь — это твой выбор вернуться к нему. "
+        "Если снова промолчишь — это тоже твой выбор. "
+        "Но тогда не жалуйся, что тебя игнорят: это ты молчишь."
     )
     return "\n".join(lines)

@@ -1,7 +1,4 @@
 // core.js — роутер с hash-навигацией
-//
-// URL теперь всегда отражает страницу: #/users, #/user_profile/123, #/chat.
-// При перезагрузке страница восстанавливается из адреса.
 
 const pages = {};
 
@@ -41,6 +38,7 @@ function closeSidebar() {
 
 const MAIN_TABS = new Set([
     'dashboard', 'soul', 'thoughts', 'reflections',
+    'images',
     'queue', 'users', 'chat',
 ]);
 
@@ -48,7 +46,6 @@ const MAIN_TABS = new Set([
 // ─────────────── HASH-РОУТИНГ ───────────────
 
 function parseHash() {
-    // Формат: #/page или #/page/arg
     const raw = (window.location.hash || '').replace(/^#\/?/, '');
     if (!raw) return { page: 'dashboard', arg: null };
     const parts = raw.split('/');
@@ -66,15 +63,11 @@ function buildHash(page, params) {
 async function switchPage(name, params = {}) {
     params = params || {};
 
-    // Обновляем URL
     const newHash = buildHash(name, params);
     if (window.location.hash !== newHash) {
-        // replaceState чтобы не засорять историю, но при этом
-        // чтобы back работал — используем pushState
         history.pushState({ page: name, params }, '', newHash);
     }
 
-    // Подсветка активного пункта
     if (MAIN_TABS.has(name)) {
         document.querySelectorAll('.nav-btn').forEach(b =>
             b.classList.toggle('active', b.dataset.tab === name)
@@ -137,7 +130,6 @@ function initApp() {
         btn.addEventListener('click', () => switchPage(btn.dataset.tab));
     });
 
-    // Восстанавливаем страницу из URL
     const { page, arg } = parseHash();
     const params = {};
     if (page === 'user_profile' && arg) {
@@ -154,7 +146,6 @@ function initApp() {
 
     window.addEventListener('resize', refreshHeaderStatus);
 
-    // Навигация «назад/вперёд» в браузере
     window.addEventListener('popstate', (e) => {
         const { page, arg } = parseHash();
         const p = {};
@@ -162,8 +153,6 @@ function initApp() {
             const n = parseInt(arg, 10);
             if (!Number.isNaN(n)) p.user_id = n;
         }
-        // switchPage уже обновит hash, но чтобы не зациклиться —
-        // вызываем напрямую рендер
         if (MAIN_TABS.has(page)) {
             document.querySelectorAll('.nav-btn').forEach(b =>
                 b.classList.toggle('active', b.dataset.tab === page)

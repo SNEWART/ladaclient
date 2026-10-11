@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lada.core.memory import list_users, get_history
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core.persona import get_persona
 from lada.core.llm_chat import chat as llm_chat
 from config import MODEL, REFLECTION_INTERVAL

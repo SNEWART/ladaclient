@@ -1,0 +1,334 @@
+# lancedb_memory.py — векторная память на LanceDB (замена FAISS)
+#
+# Полностью сохраняет интерфейс faiss_memory, включая property `metadata`.
+# Без pandas — работаем через pyarrow напрямую.
+
+import hashlib
+import time
+from collections import OrderedDict
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import lancedb
+import ollama
+from config import (
+    EMBEDDING_MODEL,
+    FAISS_TOP_K, FAISS_MIN_SCORE, FAISS_MAX_CHARS,
+    EMBED_CACHE_SIZE,
+)
+
+DATA_DIR = Path("data")
+LANCEDB_DIR = DATA_DIR / "lancedb"
+TABLE_NAME = "memory"
+
+META_CACHE_TTL = 5.0
+
+
+class LanceMemory:
+    def __init__(self):
+        self.db = lancedb.connect(str(LANCEDB_DIR))
+        self.table = None
+        self._embed_broken_reported = False
+        self._embed_cache = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._meta_cache = None
+        self._meta_cache_time = 0.0
+
+    # ─────────────── ЗАГРУЗКА ───────────────
+
+    def load(self):
+        try:
+            self.table = self.db.open_table(TABLE_NAME)
+            print(f"   🗄 LanceDB: таблица '{TABLE_NAME}' открыта "
+                  f"({self.table.count_rows()} записей)")
+        except Exception:
+            print(f"   🗄 LanceDB: таблица '{TABLE_NAME}' не найдена, "
+                  f"будет создана при первой записи")
+            self.table = None
+
+    def _ensure_table(self, sample_vector: list):
+        if self.table is not None:
+            return
+        import pyarrow as pa
+        dim = len(sample_vector)
+        schema = pa.schema([
+            pa.field("vector", pa.list_(pa.float32(), dim)),
+            pa.field("text", pa.string()),
+            pa.field("category", pa.string()),
+            pa.field("source", pa.string()),
+            pa.field("user_id", pa.int64()),
+            pa.field("timestamp", pa.string()),
+        ])
+        self.table = self.db.create_table(TABLE_NAME, schema=schema)
+
+    def save(self):
+        """LanceDB сохраняет автоматически."""
+        pass
+
+    # ─────────────── METADATA (совместимость с FAISS) ───────────────
+
+    @property
+    def metadata(self) -> list:
+        now = time.time()
+        if (self._meta_cache is not None
+                and now - self._meta_cache_time < META_CACHE_TTL):
+            return self._meta_cache
+
+        if self.table is None:
+            self._meta_cache = []
+            self._meta_cache_time = now
+            return []
+
+        try:
+            tbl = self.table.to_arrow()
+            cols = {name: tbl.column(name).to_pylist()
+                    for name in tbl.column_names}
+        except Exception as e:
+            print(f"   ⚠️ LanceDB metadata: {e}")
+            self._meta_cache = []
+            self._meta_cache_time = now
+            return []
+
+        n = len(cols.get("text", []))
+        out = []
+        for i in range(n):
+            uid = cols["user_id"][i] if "user_id" in cols else None
+            if uid is not None and int(uid) == -1:
+                uid = None
+            out.append({
+                "text": cols["text"][i] or "",
+                "category": (cols["category"][i]
+                             if "category" in cols else "general"),
+                "source": (cols["source"][i]
+                           if "source" in cols else "reflection"),
+                "user_id": uid,
+                "timestamp": (cols["timestamp"][i]
+                              if "timestamp" in cols else ""),
+            })
+
+        self._meta_cache = out
+        self._meta_cache_time = now
+        return out
+
+    def _invalidate_meta_cache(self):
+        self._meta_cache = None
+        self._meta_cache_time = 0.0
+
+    # ─────────────── КЭШ ЭМБЕДДИНГОВ ───────────────
+
+    @staticmethod
+    def _cache_key(text: str) -> str:
+        return hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _cache_get(self, text: str):
+        key = self._cache_key(text)
+        if key in self._embed_cache:
+            self._embed_cache.move_to_end(key)
+            self._cache_hits += 1
+            return self._embed_cache[key]
+        return None
+
+    def _cache_put(self, text: str, vec):
+        key = self._cache_key(text)
+        self._embed_cache[key] = vec
+        self._embed_cache.move_to_end(key)
+        while len(self._embed_cache) > EMBED_CACHE_SIZE:
+            self._embed_cache.popitem(last=False)
+
+    def cache_stats(self):
+        total = self._cache_hits + self._cache_misses
+        if total == 0:
+            return 0, 0, 0.0
+        return self._cache_hits, total, self._cache_hits / total
+
+    # ─────────────── ЭМБЕДДИНГИ ───────────────
+
+    def _report_embedding_broken(self, err):
+        if not self._embed_broken_reported:
+            print("=" * 60, flush=True)
+            print("🛑 КРИТИЧНО: ЭМБЕДДИНГИ НЕ РАБОТАЮТ", flush=True)
+            print(f"   Причина: {err}", flush=True)
+            print(f"   Решение: ollama pull {EMBEDDING_MODEL}", flush=True)
+            print("=" * 60, flush=True)
+            self._embed_broken_reported = True
+
+    def _embed(self, text: str):
+        cached = self._cache_get(text)
+        if cached is not None:
+            return cached
+        try:
+            resp = ollama.embed(
+                model=EMBEDDING_MODEL, input=text, keep_alive="30m"
+            )
+            vec = np.asarray(resp["embeddings"][0], dtype=np.float32)
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            self._cache_misses += 1
+            self._cache_put(text, vec)
+            return vec
+        except Exception as e:
+            self._report_embedding_broken(e)
+            return None
+
+    def health_check(self):
+        v = self._embed("health check")
+        if v is None:
+            return False, f"эмбеддинг {EMBEDDING_MODEL} недоступен"
+        return True, "ok"
+
+    # ─────────────── ЗАПИСЬ ───────────────
+
+    def add(self, text: str, category: str = "general",
+            source: str = "reflection", user_id: int = None) -> bool:
+        if not text.strip():
+            return False
+        vec = self._embed(text)
+        if vec is None:
+            return False
+        self._ensure_table(vec.tolist())
+
+        uid = user_id if user_id is not None else -1
+        record = {
+            "vector": vec.tolist(),
+            "text": text,
+            "category": category,
+            "source": source,
+            "user_id": uid,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.table.add([record])
+        self._invalidate_meta_cache()
+        return True
+
+    def add_many(self, items: list, verbose: bool = True) -> int:
+        if not items:
+            return 0
+
+        records = []
+        for item in items:
+            vec = self._embed(item["text"])
+            if vec is None:
+                continue
+            self._ensure_table(vec.tolist())
+            uid = item.get("user_id")
+            records.append({
+                "vector": vec.tolist(),
+                "text": item["text"],
+                "category": item.get("category", "general"),
+                "source": item.get("source", "reflection"),
+                "user_id": uid if uid is not None else -1,
+                "timestamp": item.get("timestamp")
+                    or datetime.now().isoformat(timespec="seconds"),
+            })
+
+        if records:
+            self.table.add(records)
+            self._invalidate_meta_cache()
+
+        if verbose:
+            print(f"   ✅ LanceDB: добавлено {len(records)} "
+                  f"(пропущено: {len(items) - len(records)})")
+        return len(records)
+
+    def rebuild(self, items: list):
+        try:
+            self.db.drop_table(TABLE_NAME)
+        except Exception:
+            pass
+        self.table = None
+        self._invalidate_meta_cache()
+        if items:
+            self.add_many(items)
+
+    # ─────────────── ПОИСК ───────────────
+
+    def search(self, query: str, k: int = None, user_id: int = None,
+               min_score: float = None, max_chars: int = None):
+        if self.table is None:
+            return []
+        if k is None:
+            k = FAISS_TOP_K
+        if min_score is None:
+            min_score = FAISS_MIN_SCORE
+        if max_chars is None:
+            max_chars = FAISS_MAX_CHARS
+
+        vec = self._embed(query)
+        if vec is None:
+            return []
+
+        if user_id is not None:
+            where = f"user_id = {user_id} OR user_id = -1"
+        else:
+            where = "user_id = -1"
+
+        try:
+            q = (
+                self.table.search(vec.tolist())
+                .metric("cosine")
+                .where(where, prefilter=True)
+                .limit(k)
+            )
+            results = q.to_list()
+        except Exception as e:
+            print(f"   ⚠️ LanceDB search error: {e}")
+            return []
+
+        out = []
+        total_chars = 0
+        for r in results:
+            score = 1.0 - float(r.get("_distance", 1.0))
+            if score < min_score:
+                continue
+            text = r.get("text", "")
+            if max_chars > 0 and total_chars + len(text) > max_chars:
+                break
+            out.append({
+                "text": text,
+                "category": r.get("category", "general"),
+                "source": r.get("source", "reflection"),
+                "user_id": (None if r.get("user_id") == -1
+                            else r.get("user_id")),
+                "timestamp": r.get("timestamp", ""),
+            })
+            total_chars += len(text)
+
+        return out
+
+    # ─────────────── СТАТИСТИКА ───────────────
+
+    def count(self) -> int:
+        if self.table is None:
+            return 0
+        return self.table.count_rows()
+
+    def count_by_category(self, category: str, user_id: int = None) -> int:
+        if self.table is None:
+            return 0
+        try:
+            if user_id is None:
+                filt = f"category = '{category}' AND user_id = -1"
+            else:
+                filt = f"category = '{category}' AND user_id = {user_id}"
+            return self.table.count_rows(filter=filt)
+        except Exception:
+            return 0
+
+    def list_users(self) -> list:
+        if self.table is None:
+            return []
+        try:
+            tbl = self.table.to_arrow()
+            col = tbl.column("user_id").to_pylist()
+            uids = {int(u) for u in col if u is not None and int(u) >= 0}
+            return sorted(uids)
+        except Exception:
+            return []
+
+
+# Глобальный экземпляр — используется через алиас faiss_mem
+lance_mem = LanceMemory()
+lance_mem.load()

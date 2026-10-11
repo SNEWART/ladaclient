@@ -1,8 +1,7 @@
 # return_loop.py — возврат к непрочитанным сообщениям.
 #
-# Отличие от initiative: там Лада пишет ПЕРВОЙ, когда давно никого
-# не слышала. Здесь — человек уже писал, а Лада не ответила.
-# Возврат опирается на контент его сообщений, а не на «привет, как дела».
+# FIX: wm_block теперь вызывается с user_id (раньше падало с
+# "as_context_block() missing 1 required positional argument: 'user_id'").
 
 import asyncio
 import random
@@ -14,19 +13,16 @@ from lada.core import users_names
 from lada.core.memory import get_history, add_message
 from lada.core.working_memory import as_context_block as wm_block
 from lada.core import unread
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core.persona import get_persona
 from lada.core.llm_json import chat_json
 from lada.brain import mood, sins, image_policy
 from lada.brain.relationship import get_status_label
 
-# Через сколько часов после последнего непрочитанного пробуем возврат
+
 RETURN_MIN_HOURS = 3.0
-# Не чаще одного возврата на юзера раз в N часов
 RETURN_COOLDOWN_HOURS = 6.0
-# Шанс, что Лада решит вернуться сейчас (не 100%, живая же)
 RETURN_CHANCE = 0.55
-# Как часто цикл проверяет
 CHECK_INTERVAL_MINUTES = 30
 
 
@@ -69,7 +65,8 @@ def _build_context(user_id: int) -> str:
     parts.append(f"Настроение: {mood.get_mood()}.")
     parts.append(f"Статус: {get_status_label(user_id)}.")
 
-    wm = wm_block()
+    # FIX: передаём user_id — раньше падало с TypeError
+    wm = wm_block(user_id)
     if wm:
         parts.append("")
         parts.append(wm)
@@ -88,7 +85,6 @@ def _build_context(user_id: int) -> str:
             role = "Он" if m["role"] == "user" else "Ты"
             parts.append(f"  {role}: {(m.get('content') or '')[:150]}")
 
-    # общие наблюдения
     obs = [
         m for m in faiss_mem.metadata
         if m.get("user_id") == user_id and m.get("category") == "observation"
@@ -104,24 +100,20 @@ def _build_context(user_id: int) -> str:
 
 async def try_return(client, user_id: int) -> bool:
     if not INITIATIVE_ENABLED:
-        # переиспользуем тот же тумблер, чтобы выключить всю автономию разом
         return False
 
     pending = unread.get_pending(user_id)
     if not pending:
         return False
 
-    # давно ли он написал последнее?
     since = unread.hours_since_last_unread(user_id)
     if since < RETURN_MIN_HOURS:
         return False
 
-    # не дёргали ли уже недавно?
     since_attempt = unread.hours_since_last_return_attempt(user_id)
     if since_attempt < RETURN_COOLDOWN_HOURS:
         return False
 
-    # настроение не располагает?
     m = mood.get_mood()
     if m in ("раздражённая", "расстроенная", "холодная"):
         return False
@@ -130,7 +122,6 @@ async def try_return(client, user_id: int) -> bool:
     if state.get("гнев", 50) > 75:
         return False
 
-    # случайность — не 100%
     if random.random() > RETURN_CHANCE:
         return False
 
@@ -160,16 +151,13 @@ async def try_return(client, user_id: int) -> bool:
         print(f"   ⚠️ Возврат не отправлен: {e}")
         return False
 
-    # записываем ответ в историю
     try:
         add_message(user_id, "assistant", message, max_history=MAX_HISTORY)
     except Exception as e:
         print(f"   ⚠️ Не записал в историю: {e}")
 
-    # очищаем unread — вернулись
     unread.mark_read(user_id)
 
-    # пишем в faiss
     faiss_mem.add(
         message,
         category="return",
@@ -187,7 +175,7 @@ async def return_loop(client):
         print("   ⏸ return_loop выключен (INITIATIVE_ENABLED=False)")
         return
 
-    await asyncio.sleep(180)  # подождём пока бот поднимется
+    await asyncio.sleep(180)
     while True:
         try:
             users = unread.list_users_with_pending()

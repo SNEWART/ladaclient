@@ -1,54 +1,69 @@
-# will.py — свобода воли Лады + история фото + детект границ + дождь-контроль.
+# will.py — свобода воли + история фото + детект границ + дождь-контроль
+# (SQLite для photo_history)
 
-import json
 import re
 from datetime import datetime
-from pathlib import Path
 
+from lada.core.db import get_conn, ensure_user, Transaction
 from lada.brain import sins, mood
 from lada.brain.relationship import familiarity_label, get_status
 
-PHOTO_HISTORY_FILE = Path("data") / "photo_history.json"
-PHOTO_HISTORY_FILE.parent.mkdir(exist_ok=True)
 
 PHOTO_COOLDOWN_HINT = 15
 
 
-# ─────────────────────────────────────────────
-# ИСТОРИЯ ФОТО
-# ─────────────────────────────────────────────
-def _load_history() -> dict:
-    if PHOTO_HISTORY_FILE.exists():
-        try:
-            return json.loads(PHOTO_HISTORY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+# ─────────────── ИСТОРИЯ ФОТО ───────────────
 
-
-def _save_history(data: dict):
-    PHOTO_HISTORY_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+def _read_photo_entry(user_id: int) -> dict:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT last_photo_msg_count, total_photos, recent_prompts "
+        "FROM photo_history WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {"last_photo_msg_count": 0, "total_photos": 0,
+                "recent_prompts": []}
+    import json
+    try:
+        prompts = json.loads(row["recent_prompts"]) if row["recent_prompts"] else []
+    except Exception:
+        prompts = []
+    return {
+        "last_photo_msg_count": row["last_photo_msg_count"] or 0,
+        "total_photos": row["total_photos"] or 0,
+        "recent_prompts": prompts,
+    }
 
 
 def get_last_photo_msg_count(user_id: int) -> int:
-    data = _load_history()
-    return int(data.get(str(user_id), {}).get("last_photo_msg_count", 0))
+    return int(_read_photo_entry(user_id)["last_photo_msg_count"])
 
 
 def touch_photo_sent(user_id: int, msg_count: int, prompt: str):
-    data = _load_history()
-    key = str(user_id)
-    entry = data.get(key, {})
+    import json
+    entry = _read_photo_entry(user_id)
     entry["last_photo_msg_count"] = int(msg_count)
     entry["total_photos"] = int(entry.get("total_photos", 0)) + 1
     recent = entry.get("recent_prompts", [])
     recent.append(prompt[:200])
-    entry["recent_prompts"] = recent[-10:]
-    data[key] = entry
-    _save_history(data)
+    recent = recent[-10:]
+
+    ts = datetime.now().isoformat(timespec="seconds")
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO photo_history "
+            "(user_id, last_photo_msg_count, total_photos, recent_prompts, updated) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "last_photo_msg_count = excluded.last_photo_msg_count, "
+            "total_photos = excluded.total_photos, "
+            "recent_prompts = excluded.recent_prompts, "
+            "updated = excluded.updated",
+            (user_id, entry["last_photo_msg_count"], entry["total_photos"],
+             json.dumps(recent, ensure_ascii=False), ts),
+        )
 
 
 def messages_since_last_photo(user_id: int, current_count: int) -> int:
@@ -58,9 +73,8 @@ def messages_since_last_photo(user_id: int, current_count: int) -> int:
     return max(0, current_count - last)
 
 
-# ─────────────────────────────────────────────
-# ОПИСАНИЕ НАСТРОЕНИЯ ДЛЯ ФОТО
-# ─────────────────────────────────────────────
+# ─────────────── ОПИСАНИЕ НАСТРОЕНИЯ ───────────────
+
 def mood_descriptor_for_photo() -> str:
     m = mood.get_mood()
     mapping = {
@@ -79,14 +93,12 @@ def mood_descriptor_for_photo() -> str:
     return mapping.get(m, "нейтральна")
 
 
-# ─────────────────────────────────────────────
-# ДОЖДЬ-КОНТРОЛЬ
-# ─────────────────────────────────────────────
+# ─────────────── ДОЖДЬ-КОНТРОЛЬ ───────────────
+
 RAIN_WORDS = ["дожд", "пасмурн", "сыро", "льёт", "льет", "моросит", "луж"]
 
 
 def count_rain_mentions(history: list, only_assistant: bool = True) -> int:
-    """Сколько раз в последних сообщениях встречалось упоминание дождя."""
     count = 0
     for m in history:
         if only_assistant and m.get("role") != "assistant":
@@ -97,13 +109,8 @@ def count_rain_mentions(history: list, only_assistant: bool = True) -> int:
     return count
 
 
-def rain_signal(user_id: int) -> str | None:
-    """
-    Если Лада слишком часто говорила про дождь — возвращаем блок-предупреждение.
-    Сама подгружает историю пользователя.
-    """
+def rain_signal(user_id: int):
     from lada.core.memory import get_history
-
     try:
         history = get_history(user_id, limit=30)
     except Exception:
@@ -124,9 +131,8 @@ def rain_signal(user_id: int) -> str | None:
     return None
 
 
-# ─────────────────────────────────────────────
-# ДЕТЕКТ ГРАНИЦ
-# ─────────────────────────────────────────────
+# ─────────────── ДЕТЕКТ ГРАНИЦ ───────────────
+
 BOUNDARY_MARKERS = [
     "не присылай", "не отправляй", "не показывай",
     "хватит фото", "хватит этих фото", "больше не присылай",
@@ -145,7 +151,7 @@ BOUNDARY_SOFT_MARKERS = [
 ]
 
 
-def detect_boundary_request(message: str) -> str | None:
+def detect_boundary_request(message: str):
     if not message:
         return None
     low = message.lower().strip()
@@ -158,7 +164,7 @@ def detect_boundary_request(message: str) -> str | None:
     return None
 
 
-def boundary_signal(message: str) -> str | None:
+def boundary_signal(message: str):
     marker = detect_boundary_request(message)
     if not marker:
         return None
@@ -173,9 +179,8 @@ def boundary_signal(message: str) -> str | None:
     )
 
 
-# ─────────────────────────────────────────────
-# СИГНАЛЫ ДЛЯ МОДЕЛИ
-# ─────────────────────────────────────────────
+# ─────────────── СИГНАЛЫ ───────────────
+
 def response_signal(user_id: int, message: str) -> str:
     m = mood.get_mood()
     state = sins.get_state()
@@ -208,13 +213,9 @@ def response_signal(user_id: int, message: str) -> str:
     return "; ".join(parts)
 
 
-def photo_signal(
-    user_id: int,
-    scene: str = "",
-    source: str = "chat",
-    msgs_since_last_photo: int = 9999,
-    user_requested: bool = False,
-) -> str:
+def photo_signal(user_id: int, scene: str = "", source: str = "chat",
+                 msgs_since_last_photo: int = 9999,
+                 user_requested: bool = False) -> str:
     m = mood.get_mood()
     state = sins.get_state()
     status = get_status(user_id)

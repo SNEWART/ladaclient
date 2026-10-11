@@ -1,6 +1,10 @@
 # monologue.py — внутренний монолог Лады
+#
+# FIX: дедупликация. Раньше модель писала одну и ту же мысль
+# ("люди либо хотят объяснить, либо дать место") по 20 раз в сутки.
 
 import asyncio
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 import ollama
@@ -11,11 +15,13 @@ from config import (
     MONOLOGUE_INJECT_RECENT_HOURS, MONOLOGUE_INJECT_MAX,
 )
 from lada.core.persona import get_persona
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core.memory import list_users, get_history
 
 MONOLOGUE_LOG = Path("data") / "monologue.log"
 MONOLOGUE_LOG.parent.mkdir(exist_ok=True)
+
+DUPLICATE_THRESHOLD = 0.85
 
 MONOLOGUE_PROMPT = (
     "Ты сейчас наедине с собой. Это твой внутренний монолог — "
@@ -25,6 +31,31 @@ MONOLOGUE_PROMPT = (
     "Пиши от первого лица, коротко — 1-3 предложения. "
     "Не задавай вопросов, не обращайся ни к кому. Просто думай."
 )
+
+
+def _tokens(s: str) -> set:
+    return set(re.findall(r'\w{4,}', s.lower()))
+
+
+def _is_duplicate(text: str) -> float:
+    """Возвращает max overlap с последними монологами (0..1)."""
+    recent = [
+        m for m in faiss_mem.metadata
+        if m.get("category") == "monologue"
+    ][-10:]
+    new_tokens = _tokens(text)
+    if not new_tokens:
+        return 0.0
+    max_overlap = 0.0
+    for m in recent:
+        old_tokens = _tokens(m.get("text", ""))
+        if not old_tokens:
+            continue
+        overlap = len(new_tokens & old_tokens) / max(
+            len(new_tokens), len(old_tokens)
+        )
+        max_overlap = max(max_overlap, overlap)
+    return max_overlap
 
 
 def _build_context() -> str:
@@ -45,7 +76,10 @@ def _build_context() -> str:
             parts.append(f"  (с ID {uid})\n" + "\n".join(snippets))
 
     # недавняя память (без монологов)
-    recent = [m for m in faiss_mem.metadata if m.get("category") != "monologue"][-8:]
+    recent = [
+        m for m in faiss_mem.metadata
+        if m.get("category") != "monologue"
+    ][-8:]
     if recent:
         parts.append("\nЧто лежит в памяти:")
         for m in recent:
@@ -88,13 +122,22 @@ async def think_once() -> str:
 
     if thinking:
         print(f"   🧠 Размышления ({len(thinking)} симв.)")
-    print(f"   📝 Мысль ({len(content)} симв.): {content[:150]!r}")
 
     text = content
 
     if not text or len(text) < 10:
         print("   ⚠️ Модель не дошла до финальной мысли, пропускаю")
         return ""
+
+    # FIX: дедупликация — не пишем, если похоже на последние 10 монологов
+    try:
+        overlap = _is_duplicate(text)
+        if overlap > DUPLICATE_THRESHOLD:
+            print(f"   🔁 Похоже на прошлую мысль (overlap={overlap:.2f}), "
+                  f"пропускаю")
+            return ""
+    except Exception as e:
+        print(f"   ⚠️ dedup-проверка упала: {e}")
 
     faiss_mem.add(text, category="monologue", source="monologue")
 
@@ -125,7 +168,8 @@ async def monologue_loop(interval_minutes: int = None):
     await asyncio.sleep(MONOLOGUE_FIRST_DELAY_MINUTES * 60)
     while True:
         try:
-            print(f"\n💭 [{datetime.now().strftime('%H:%M:%S')}] Внутренний монолог...")
+            print(f"\n💭 [{datetime.now().strftime('%H:%M:%S')}] "
+                  f"Внутренний монолог...")
             await think_once()
         except Exception as e:
             print(f"⚠️ Ошибка в цикле монолога: {e}")
@@ -135,7 +179,9 @@ async def monologue_loop(interval_minutes: int = None):
 def clear_all():
     """Очистить все монологи из FAISS и лога."""
     global faiss_mem
-    faiss_mem.metadata = [m for m in faiss_mem.metadata if m.get("category") != "monologue"]
+    faiss_mem.metadata = [
+        m for m in faiss_mem.metadata if m.get("category") != "monologue"
+    ]
     faiss_mem.save()
     if MONOLOGUE_LOG.exists():
         MONOLOGUE_LOG.unlink()

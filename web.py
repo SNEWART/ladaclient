@@ -7,15 +7,17 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from config import MODEL, OWNER_ID
 from lada.core.persona import get_persona
-from lada.core.faiss_memory import faiss_mem
-from lada.core.memory import get_history, add_message, _user_file, list_users
+from lada.core.lancedb_memory import lance_mem as faiss_mem
+from lada.core.memory import (
+    get_history, add_message, clear_history, list_users,
+)
 from lada.core import users_names
 from lada.core.llm import ask
 from lada.telegram.mode import get_mode, set_mode
@@ -32,10 +34,9 @@ app = FastAPI(title="Lada")
 WEB_CHAT_USER_ID = 999999999
 VIEW_USER_ID = OWNER_ID
 WEB_UI_DIR = Path("web_ui")
+IMAGES_DIR = Path("data/generated_images")
 
-# ─────────────── FIX: Basic Auth ───────────────
-# Логин/пароль берутся из переменных окружения.
-# Если WEB_AUTH_USER не задан — аутентификация отключена (для локальной разработки).
+# ─────────────── Basic Auth ───────────────
 WEB_AUTH_USER = os.environ.get("WEB_AUTH_USER", "")
 WEB_AUTH_PASS = os.environ.get("WEB_AUTH_PASS", "")
 
@@ -93,6 +94,9 @@ class MaxLevelRequest(BaseModel):
 class StatusRequest(BaseModel):
     user_id: int
     status: str
+
+class SleepRequest(BaseModel):
+    force: bool = False
 
 
 # ─────────────── UI ───────────────
@@ -153,8 +157,6 @@ async def reflections(_: bool = Depends(require_auth)):
     ]
 
 
-# ─────────────── FIX: Наблюдения ───────────────
-
 @app.get("/api/observations")
 async def observations(_: bool = Depends(require_auth)):
     """Свежие наблюдения о владельце (последние 50)."""
@@ -164,7 +166,8 @@ async def observations(_: bool = Depends(require_auth)):
     ][-50:]
     items.reverse()
     return [
-        {"text": m.get("text", ""), "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " ")}
+        {"text": m.get("text", ""),
+         "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " ")}
         for m in items
     ]
 
@@ -194,9 +197,11 @@ async def do_reflect(_: bool = Depends(require_auth)):
 
 
 @app.post("/api/sleep")
-async def do_sleep(_: bool = Depends(require_auth)):
-    result = await consolidate()
-    return {"result": result}
+async def do_sleep(req: SleepRequest | None = None,
+                    _: bool = Depends(require_auth)):
+    force = bool(req.force) if req else False
+    result = await consolidate(force=force)
+    return {"result": result, "forced": force}
 
 
 # ─────────────── Очередь ───────────────
@@ -231,7 +236,9 @@ async def users_names_api(_: bool = Depends(require_auth)):
 
 @app.get("/api/trust")
 async def trust_list(_: bool = Depends(require_auth)):
-    from lada.brain.relationship import familiarity, get_status, get_status_label, get_pending
+    from lada.brain.relationship import (
+        familiarity, get_status, get_status_label, get_pending,
+    )
     result = []
     for uid in list_users():
         result.append({
@@ -282,7 +289,7 @@ async def trust_levels(_: bool = Depends(require_auth)):
     }
 
 
-# ─────────────── СПИСОК ПОЛЬЗОВАТЕЛЕЙ ───────────────
+# ─────────────── Список пользователей ───────────────
 
 @app.get("/api/users/list")
 async def users_list(_: bool = Depends(require_auth)):
@@ -328,7 +335,7 @@ async def users_list(_: bool = Depends(require_auth)):
     return result
 
 
-# ─────────────── ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ───────────────
+# ─────────────── Профиль пользователя ───────────────
 
 @app.get("/api/user/{user_id}/profile")
 async def user_profile(user_id: int, _: bool = Depends(require_auth)):
@@ -342,14 +349,12 @@ async def user_profile(user_id: int, _: bool = Depends(require_auth)):
         "display_name": users_names.display_name(user_id),
         "raw": users_names.get(user_id),
         "is_owner": user_id == OWNER_ID,
-
         "familiarity": round(familiarity(user_id), 3),
         "trust": round(image_policy.get_trust(user_id), 3),
         "intimacy": round(image_policy.get_intimacy(user_id), 3),
         "max_level": image_policy._max_level_for_user(user_id),
         "effective_max": image_policy.effective_max_level(user_id),
         "max_level_override": image_policy.get_max_level_override(user_id),
-
         "familiarity_label": familiarity_label(user_id),
         "status": get_status(user_id),
         "status_label": get_status_label(user_id),
@@ -376,7 +381,6 @@ async def user_profile(user_id: int, _: bool = Depends(require_auth)):
     profile["observations"] = observations[:80]
     profile["emotions"] = emotions[:80]
     profile["images"] = images[:30]
-
     profile["observations_count"] = len(observations)
     profile["emotions_count"] = len(emotions)
     profile["images_count"] = len(images)
@@ -421,7 +425,8 @@ async def dialogs_list(_: bool = Depends(require_auth)):
 
 
 @app.get("/api/dialogs/{user_id}")
-async def dialog_get(user_id: int, limit: int = 200, _: bool = Depends(require_auth)):
+async def dialog_get(user_id: int, limit: int = 200,
+                      _: bool = Depends(require_auth)):
     history = get_history(user_id)
     return [
         {
@@ -435,9 +440,8 @@ async def dialog_get(user_id: int, limit: int = 200, _: bool = Depends(require_a
 
 @app.post("/api/dialogs/{user_id}/clear")
 async def dialog_clear(user_id: int, _: bool = Depends(require_auth)):
-    f = _user_file(user_id)
-    if f.exists():
-        f.unlink()
+    # SQLite: удаляем из таблицы messages
+    clear_history(user_id)
     return {"ok": True}
 
 
@@ -457,7 +461,10 @@ async def chat(req: ChatRequest, _: bool = Depends(require_auth)):
     related = [r for r in related if r.get("category") != "emotion"][:5]
     if related:
         kt = "\n".join(f"- {k['text'][:200]}" for k in related)
-        history = history + [{"role": "system", "content": f"Вот что ты уже знаешь:\n{kt}"}]
+        history = history + [{
+            "role": "system",
+            "content": f"Вот что ты уже знаешь:\n{kt}",
+        }]
 
     content, thinking = await asyncio.to_thread(ask, history)
     reply = content or thinking or "…"
@@ -474,7 +481,77 @@ async def chat_history(_: bool = Depends(require_auth)):
 
 @app.post("/api/chat/clear")
 async def chat_clear(_: bool = Depends(require_auth)):
-    f = _user_file(WEB_CHAT_USER_ID)
-    if f.exists():
-        f.unlink()
+    # SQLite: удаляем из таблицы messages
+    clear_history(WEB_CHAT_USER_ID)
     return {"ok": True}
+# ─────────────── Генерированные фото ───────────────
+
+@app.get("/api/images")
+async def list_images(_: bool = Depends(require_auth)):
+    """Список сгенерированных фото (последние 60, свежие сначала)."""
+    if not IMAGES_DIR.exists():
+        return []
+
+    files = []
+    for f in IMAGES_DIR.glob("*.png"):
+        try:
+            st = f.stat()
+            files.append({
+                "name": f.name,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+            })
+        except Exception:
+            continue
+
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    files = files[:60]
+
+    result = []
+    for f in files:
+        ts = datetime.fromtimestamp(f["mtime"]).strftime("%Y-%m-%d %H:%M")
+        kind = "lada"
+        if f["name"].startswith("cat_"):
+            kind = "cat"
+        result.append({
+            "name": f["name"],
+            "url": f"/api/images/{f['name']}",
+            "size_kb": round(f["size"] / 1024, 1),
+            "timestamp": ts,
+            "kind": kind,
+        })
+    return result
+
+
+@app.get("/api/images/{filename}")
+async def get_image(filename: str, _: bool = Depends(require_auth)):
+    """Отдаёт сам файл картинки."""
+    # Защита от path traversal: оставляем только имя файла
+    safe_name = Path(filename).name
+    if not safe_name.endswith(".png"):
+        raise HTTPException(400, "Только .png")
+
+    path = IMAGES_DIR / safe_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Не найдено")
+
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.delete("/api/images/{filename}")
+async def delete_image(filename: str, _: bool = Depends(require_auth)):
+    """Удаляет файл картинки."""
+    safe_name = Path(filename).name
+    if not safe_name.endswith(".png"):
+        raise HTTPException(400, "Только .png")
+
+    path = IMAGES_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(404, "Не найдено")
+
+    try:
+        path.unlink()
+    except Exception as e:
+        raise HTTPException(500, f"Не удалось удалить: {e}")
+
+    return {"ok": True, "name": safe_name}

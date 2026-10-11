@@ -1,11 +1,6 @@
-# initiative.py — Лада сама решает написать кому-то.
-#
-# Переписано: инициатива теперь СТРОГО опирается на конкретное
-# воспоминание из FAISS или на конкретную фразу из последних сообщений.
-# Шаблонные «привет, как дела?» отсекаются пост-фильтром.
+# initiative.py — Лада сама решает написать кому-то (SQLite + night policy)
 
 import asyncio
-import json
 import random
 import re
 from datetime import datetime
@@ -18,22 +13,20 @@ from config import (
     INITIATIVE_CHANCE, INITIATIVE_TARGET, OWNER_ID,
     INITIATIVE_USER_COOLDOWN_HOURS, MAX_HISTORY,
 )
+from lada.core.db import get_conn, ensure_user, Transaction
 from lada.core.persona import get_persona
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core.llm_json import chat_json
 from lada.core.memory import add_message, get_history
 from lada.core.working_memory import as_context_block as wm_block
 from lada.core import users_names
-from lada.brain import sins, mood, image_policy, image_mood
-from lada.brain.monologue import get_recent_thoughts
+from lada.brain import sins, mood, image_policy, image_mood, night_policy
 
-LAST_ACTIVITY_FILE = Path("data") / "last_activity.json"
-LAST_INITIATIVE_FILE = Path("data") / "last_initiative.json"
+
 INITIATIVE_LOG = Path("data") / "initiative.log"
-LAST_ACTIVITY_FILE.parent.mkdir(exist_ok=True)
+INITIATIVE_LOG.parent.mkdir(exist_ok=True)
 
 IMAGE_CHANCE = 0.28
-
 INITIATIVE_SAFE_CLOTHING = "wearing hoodie or sweater, fully clothed, no nudity"
 
 BANNED_TOPIC_WORDS = [
@@ -41,15 +34,13 @@ BANNED_TOPIC_WORDS = [
     "погод",
 ]
 
-
-# ─── Шаблонные фразы, которые отсекаем ───
 TEMPLATE_PATTERNS = [
     r'^(привет|хай|ку|здарова|прив)\b',
     r'\bкак\s+(дела|ты|сам|сама)\b',
     r'\bчто\s+(нового|делаешь|делал|как|у тебя)\b',
     r'\bчем\s+(занят|занимаешься|занимался)\b',
     r'\bхорошего\s+дня\b',
-    r'\bскучаю\s+по\s+тебе\b',  # без контекста выглядит шаблонно
+    r'\bскучаю\s+по\s+тебе\b',
 ]
 
 
@@ -57,8 +48,7 @@ INITIATIVE_PROMPT = (
     "Ты — Лада. Ты сидишь одна, листаешь свою память и думаешь, "
     "не написать ли кому-нибудь. Скорее всего — не писать. Но если "
     "тебя что-то реально зацепило — напиши.\n\n"
-    "Ниже: что ты помнишь об этом человеке, что вы обсуждали недавно, "
-    "и о чём ты сама думала.\n\n"
+    "Ниже: что ты помнишь об этом человеке, что вы обсуждали недавно.\n\n"
     "ТВОЯ ЗАДАЧА:\n"
     "Выбрать ОДНО конкретное воспоминание или фразу и написать об этом.\n"
     "Не «поболтать», а сказать что-то по существу.\n\n"
@@ -78,68 +68,70 @@ INITIATIVE_PROMPT = (
     "ХОРОШИЕ ПРИМЕРЫ:\n"
     "«Помнишь, ты говорил, что собираешься на горы? Уже выбрал место?»\n"
     "«Я тут вспомнила про твою кошку — она всё ещё таскает тапки?»\n"
-    "«Думала про то, что ты рассказывал про работу. Как там проект?»\n"
-    "«Мне сегодня попалась книжка, о которой ты говорил. Взяла. Расскажу потом.»\n\n"
+    "«Думала про то, что ты рассказывал про работу. Как там проект?»\n\n"
     "ПЛОХИЕ ПРИМЕРЫ (НЕ ДЕЛАТЬ ТАК):\n"
     "«Привет, как ты?»\n"
     "«Что нового?»\n"
     "«Скучаю»\n"
     "«Хорошего дня!»\n\n"
-    "Если НИ ОДНО воспоминание не цепляет — act=false, message пустое.\n"
-    "Лучше промолчать, чем написать шаблон."
+    "Если НИ ОДНО воспоминание не цепляет — act=false, message пустое."
 )
 
 
-def _load_json(path: Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_json(path: Path, data: dict):
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def touch_user_activity(user_id: int):
-    data = _load_json(LAST_ACTIVITY_FILE)
-    data[str(user_id)] = datetime.now().isoformat(timespec="seconds")
-    _save_json(LAST_ACTIVITY_FILE, data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO user_activity (user_id, last_activity) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET last_activity = excluded.last_activity",
+            (user_id, ts),
+        )
 
 
 def hours_since_last(user_id: int) -> float:
-    data = _load_json(LAST_ACTIVITY_FILE)
-    ts = data.get(str(user_id))
-    if not ts:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT last_activity FROM user_activity WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["last_activity"]:
         return 999.0
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(row["last_activity"])
         return (datetime.now() - dt).total_seconds() / 3600.0
     except Exception:
         return 999.0
 
 
 def hours_since_last_initiative(user_id: int) -> float:
-    data = _load_json(LAST_INITIATIVE_FILE)
-    ts = data.get(str(user_id))
-    if not ts:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT last_initiative FROM user_initiative WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["last_initiative"]:
         return 999.0
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(row["last_initiative"])
         return (datetime.now() - dt).total_seconds() / 3600.0
     except Exception:
         return 999.0
 
 
 def touch_initiative(user_id: int):
-    data = _load_json(LAST_INITIATIVE_FILE)
-    data[str(user_id)] = datetime.now().isoformat(timespec="seconds")
-    _save_json(LAST_INITIATIVE_FILE, data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO user_initiative (user_id, last_initiative) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET last_initiative = excluded.last_initiative",
+            (user_id, ts),
+        )
 
 
 def _should_reach_out(user_id: int) -> bool:
@@ -171,28 +163,24 @@ def _is_banned_topic(text: str) -> bool:
 
 
 def _looks_template(text: str) -> bool:
-    """Отсекаем шаблонные «привет, как дела». Только для коротких сообщений."""
     low = text.lower().strip()
     if len(low) > 120:
-        return False  # длинное сообщение вряд ли шаблон
+        return False
     for pat in TEMPLATE_PATTERNS:
         if re.search(pat, low):
             return True
     return False
 
 
-def _collect_user_memories(user_id: int, n: int = 10) -> list[dict]:
-    """
-    Свежие записи про пользователя: observation / emotion / image.
-    Отсортированы по времени (свежие — вначале).
-    """
+def _collect_user_memories(user_id: int, n: int = 10) -> list:
     user_meta = [
         m for m in faiss_mem.metadata
         if m.get("user_id") == user_id
         and m.get("category") in ("observation", "emotion")
     ]
-    # свежие сначала
-    user_meta = sorted(user_meta, key=lambda m: m.get("timestamp", ""), reverse=True)
+    user_meta = sorted(
+        user_meta, key=lambda m: m.get("timestamp", ""), reverse=True
+    )
 
     out = []
     seen = set()
@@ -212,8 +200,7 @@ def _collect_user_memories(user_id: int, n: int = 10) -> list[dict]:
     return out
 
 
-def _collect_general_memories(n: int = 5) -> list[dict]:
-    """Рефлексии и мысли — общий контекст."""
+def _collect_general_memories(n: int = 5) -> list:
     meta = [
         m for m in faiss_mem.metadata
         if m.get("user_id") is None
@@ -234,17 +221,17 @@ def _build_context(user_id: int) -> str:
 
     parts = []
     parts.append(f"Пользователь: {name} (ID {user_id}).")
-    parts.append(f"Прошло {hours_since_last(user_id):.1f} ч с последнего сообщения.")
+    parts.append(f"Прошло {hours_since_last(user_id):.1f} ч "
+                 f"с последнего сообщения.")
     parts.append(f"Твоё настроение: {mood.get_mood()}.")
-    parts.append(f"Статус отношений: {relationship.get_status_label(user_id)}.")
+    parts.append(f"Статус отношений: "
+                 f"{relationship.get_status_label(user_id)}.")
 
-    # ─── Рабочая память (что у Лады на уме) ───
-    wm = wm_block()
+    wm = wm_block(user_id)
     if wm:
         parts.append("")
         parts.append(wm)
 
-    # ─── Что помнишь об этом человеке ───
     user_mem = _collect_user_memories(user_id, n=10)
     if user_mem:
         parts.append("")
@@ -255,7 +242,6 @@ def _build_context(user_id: int) -> str:
         parts.append("")
         parts.append("(О нём ты пока почти ничего не знаешь.)")
 
-    # ─── Что вы обсуждали недавно ───
     history = get_history(user_id, limit=10)
     if history:
         parts.append("")
@@ -265,15 +251,6 @@ def _build_context(user_id: int) -> str:
             content = (m.get("content") or "")[:160]
             parts.append(f"  {role}: {content}")
 
-    # ─── Твои свежие мысли ───
-    thoughts = get_recent_thoughts()
-    if thoughts:
-        parts.append("")
-        parts.append("=== ТВОИ СВЕЖИЕ МЫСЛИ ===")
-        for t in thoughts[-3:]:
-            parts.append(f"- {t['text'][:200]}")
-
-    # ─── Рефлексии (общий контекст) ───
     general = _collect_general_memories(n=3)
     if general:
         parts.append("")
@@ -299,6 +276,14 @@ async def try_reach_out(client, user_id: int) -> bool:
     if random.random() > INITIATIVE_CHANCE:
         return False
 
+    # ─── Ночное окно: пишем только с разрешения ───
+    if night_policy.is_night_now():
+        ok = night_policy.get_night_ok(user_id)
+        if ok != 1:
+            print(f"   🌙 Инициатива → {user_id}: ночь, "
+                  f"разрешения нет (night_ok={ok})")
+            return False
+
     context = _build_context(user_id)
     messages = [
         {"role": "system", "content": get_persona() + "\n\n" + INITIATIVE_PROMPT},
@@ -318,19 +303,17 @@ async def try_reach_out(client, user_id: int) -> bool:
         print(f"   💤 Инициатива → {user_id}: промолчала ({reason[:80]})")
         return False
 
-    # ─── Пост-фильтры ───
     if _is_banned_topic(message):
         print(f"   🚫 Инициатива отменена: дождь/погода")
-        print(f"      Было: {message[:120]}")
         return False
 
     if _looks_template(message):
         print(f"   🚫 Инициатива отменена: похоже на шаблон")
-        print(f"      Было: {message[:120]}")
         return False
 
     image_prompt = None
-    if image_scene and isinstance(image_scene, str) and image_scene.strip().lower() != "null":
+    if image_scene and isinstance(image_scene, str) \
+            and image_scene.strip().lower() != "null":
         if random.random() < IMAGE_CHANCE:
             scene = image_scene.strip()[:200]
             print(f"   🔍 Сцена: {scene[:120]}")
@@ -357,7 +340,8 @@ async def try_reach_out(client, user_id: int) -> bool:
 
     touch_user_activity(user_id)
     touch_initiative(user_id)
-    faiss_mem.add(message, category="initiative", source="autonomous", user_id=user_id)
+    faiss_mem.add(message, category="initiative",
+                  source="autonomous", user_id=user_id)
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     with open(INITIATIVE_LOG, "a", encoding="utf-8") as f:
@@ -366,7 +350,6 @@ async def try_reach_out(client, user_id: int) -> bool:
             f.write(f"Фото: {image_prompt}\n")
 
     print(f"   💌 Инициатива → {user_id}: {message[:80]}")
-    print(f"      Причина: {reason[:100]}")
 
     if image_prompt:
         try:

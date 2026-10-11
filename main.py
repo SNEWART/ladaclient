@@ -1,4 +1,4 @@
-# main.py — тонкая точка входа. Вся логика в lada/app/
+# main.py — точка входа. С SQLite + догоном пропущенных сообщений.
 
 import sys as _sys
 try:
@@ -8,6 +8,8 @@ except Exception:
     pass
 
 import asyncio
+import socket
+from datetime import datetime, timedelta
 
 from telethon import events
 
@@ -16,17 +18,22 @@ from config import (
     IDLE_MINUTES, MONOLOGUE_FIRST_DELAY_MINUTES,
     INITIATIVE_ENABLED, INITIATIVE_CHECK_INTERVAL_MINUTES,
     WEB_PORT, QUEUE_WORKER_COUNT, QUEUE_DEBOUNCE_SECS,
+    MAX_HISTORY,
 )
+from lada.core.db import init_db, close_conn
 from lada.core.persona import get_persona
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
+from lada.core.memory import add_message, get_history, list_users
 from lada.brain import mood, image_policy
 from lada.brain.reflection import reflection_loop
 from lada.brain.initiative import initiative_loop
 from lada.brain.sleep import sleep_loop
 from lada.brain.monologue import monologue_loop
-from lada.brain.return_loop import return_loop   # NEW
+from lada.brain.return_loop import return_loop
+from lada.brain.activity import activity_loop
 from lada.telegram.presence import presence_loop
 from lada.telegram.mode import get_mode
+from lada.telegram.queue import QueuedMessage
 from lada.app.client import set_client, message_queue
 from lada.app.connection import connect_with_failover
 from lada.app.handlers import handler, process_batch
@@ -42,14 +49,161 @@ NOISY_EVENTS = {
     "UpdateMessagePollVote", "UpdateChatOnlineMembers",
 }
 
+CATCHUP_LIMIT = 10
+CATCHUP_MAX_AGE_HOURS = 24
+
+
+def _silent_event_loop_handler(loop, context):
+    exc = context.get("exception")
+    msg = context.get("message", "")
+    if isinstance(exc, ConnectionResetError):
+        return
+    if "Accept failed" in msg:
+        return
+    if "_call_connection_lost" in msg:
+        return
+    if "Unsupported upgrade request" in msg:
+        return
+    loop.default_exception_handler(context)
+
+
+async def catch_up_missed(client):
+    log("🔄 Проверяю пропущенные сообщения...")
+
+    try:
+        dialogs = await client.get_dialogs(limit=50)
+    except Exception as e:
+        log(f"⚠️ Не удалось получить диалоги: {e}")
+        return
+
+    me = await client.get_me()
+    me_id = me.id
+    cutoff = datetime.now().astimezone() - timedelta(hours=CATCHUP_MAX_AGE_HOURS)
+
+    caught = 0
+
+    for dialog in dialogs:
+        try:
+            if not dialog.is_user:
+                continue
+            peer = dialog.entity
+            peer_id = peer.id
+            if peer_id == me_id:
+                continue
+
+            messages = await client.get_messages(peer_id, limit=CATCHUP_LIMIT)
+            if not messages:
+                continue
+
+            messages = list(reversed(messages))
+
+            last_our_reply_idx = -1
+            for i, m in enumerate(messages):
+                if m.out and not m.action:
+                    last_our_reply_idx = i
+
+            missed = []
+            for m in messages[last_our_reply_idx + 1:]:
+                if m.out or m.action:
+                    continue
+                msg_date = m.date.astimezone()
+                if msg_date < cutoff:
+                    continue
+                missed.append(m)
+
+            if not missed:
+                continue
+
+            user_hist = get_history(peer_id, limit=20)
+            hist_texts = {
+                (h.get("content") or "").strip()
+                for h in user_hist if h.get("role") == "user"
+            }
+
+            fresh = [
+                m for m in missed
+                if (m.raw_text or "").strip() and
+                   (m.raw_text or "").strip() not in hist_texts
+            ]
+
+            if not fresh:
+                continue
+
+            text_parts = [m.raw_text.strip() for m in fresh if m.raw_text]
+            text = "\n\n".join(text_parts).strip()
+
+            if not text:
+                continue
+
+            fake = _FakeEvent(client, peer_id, fresh[-1])
+            qm = QueuedMessage(
+                user_id=peer_id,
+                chat_id=peer_id,
+                event=fake,
+                text=text[:300],
+                username=getattr(peer, "first_name", "") or str(peer_id),
+            )
+            ok = await message_queue.put(qm)
+            if ok:
+                caught += len(fresh)
+                log(f"   ↩️  Догнал {len(fresh)} сообщ. от "
+                    f"{qm.username} (ID {peer_id})")
+
+        except Exception as e:
+            log(f"⚠️ Ошибка догона для {dialog.id}: {e}")
+            continue
+
+    if caught:
+        log(f"🔄 Всего догнано: {caught} сообщ.")
+    else:
+        log("✅ Пропущенных нет")
+
+
+class _FakeEvent:
+    def __init__(self, client, chat_id, msg):
+        self._client = client
+        self.chat_id = chat_id
+        self.message = msg
+        self.raw_text = msg.raw_text or ""
+        self.media = msg.media
+        self.sender_id = chat_id
+
+    async def get_sender(self):
+        try:
+            return await self._client.get_entity(self.chat_id)
+        except Exception:
+            return None
+
+    async def respond(self, text, **kwargs):
+        return await self._client.send_message(self.chat_id, text, **kwargs)
+
 
 async def main():
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_silent_event_loop_handler)
+    except Exception:
+        pass
+
+    init_db()
+    log("💾 SQLite: база инициализирована")
+
     log("⏳ Подключаюсь к Telegram...")
 
     client = await connect_with_failover()
     if client is None:
         log("💀 Не удалось подключиться ни одним способом. Выход.")
+        close_conn()
         _sys.exit(1)
+
+    from lada.app import typing_tracker
+    from telethon.tl.types import UpdateUserTyping
+
+    @client.on(events.Raw(types=UpdateUserTyping))
+    async def typing_handler(update):
+        uid = getattr(update, "user_id", None)
+        if uid:
+            typing_tracker.touch(uid)
 
     set_client(client)
     client.add_event_handler(handler)
@@ -68,18 +222,19 @@ async def main():
     log(f"📜 Персона: {len(get_persona())} символов")
     log(f"🧠 FAISS: {faiss_mem.count()} записей")
     log(f"💭 Настроение: {mood.get_mood()}")
-    log(f"👥 Пользователей в памяти: {len(faiss_mem.list_users())}")
-
-    if image_policy.get_trust(OWNER_ID) == 0 and image_policy.get_intimacy(OWNER_ID) == 0:
-        image_policy.set_trust(OWNER_ID, trust=1.0, intimacy=1.0)
-        log("🔐 Владелец: trust=1.0, intimacy=1.0 (стартовые значения)")
+    log(f"👥 Пользователей в памяти: {len(list_users())}")
 
     message_queue.set_handler(process_batch)
     await message_queue.start()
     log(f"📬 Очередь: воркеров {QUEUE_WORKER_COUNT}, debounce {QUEUE_DEBOUNCE_SECS}с")
 
+    asyncio.create_task(catch_up_missed(client))
+
     asyncio.create_task(reflection_loop(REFLECTION_INTERVAL))
     log(f"🧠 Саморефлексия: каждые {REFLECTION_INTERVAL // 60} мин")
+
+    asyncio.create_task(activity_loop())
+    log("🎭 Занятие: обновление раз в 2 ч")
 
     asyncio.create_task(sleep_loop())
     log("💤 Сон: первый через 1 ч")
@@ -95,17 +250,18 @@ async def main():
 
     if INITIATIVE_ENABLED:
         asyncio.create_task(initiative_loop(client))
-        log(f"💌 Инициатива: проверка каждые {INITIATIVE_CHECK_INTERVAL_MINUTES} мин")
-
-        # NEW: возврат к непрочитанным
+        log(f"💌 Инициатива: каждые {INITIATIVE_CHECK_INTERVAL_MINUTES} мин")
         asyncio.create_task(return_loop(client))
-        log("↩️  Возврат к непрочитанным: проверка каждые 30 мин")
+        log("↩️  Возврат: каждые 30 мин")
 
     asyncio.create_task(start_web())
     log(f"🌐 Веб-панель: http://localhost:{WEB_PORT}")
 
     log("👂 Слушаю сообщения...")
-    await client.run_until_disconnected()
+    try:
+        await client.run_until_disconnected()
+    finally:
+        close_conn()
 
 
 if __name__ == "__main__":

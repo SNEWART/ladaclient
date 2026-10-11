@@ -1,67 +1,77 @@
-# working_memory.py — краткосрочная рабочая память Лады.
-#
-# Идея из alex2772/kuni: держим отдельный файл (data/working_memory.md)
-# с тем, что важно СЕЙЧАС (1-3 дня). Он всегда подмешивается в промпт,
-# и обновляется после каждого диалога через LLM.
-#
-# Отличие от FAISS: FAISS — долгосрочный архив, WM — оперативка.
-# В WM нет дублей, нет мусора, только активные темы и обещания.
+# working_memory.py — краткосрочная рабочая память (per-user).
 
 import asyncio
 from datetime import datetime
-from pathlib import Path
 
 import ollama
 
 from config import MODEL
+from lada.core.db import get_conn, Transaction
 
-WM_FILE = Path("data") / "working_memory.md"
-WM_FILE.parent.mkdir(exist_ok=True)
 
 MAX_CHARS = 4000
-MAX_LINES = 30
 
 
 WM_UPDATE_PROMPT = (
     "Ты — редактор рабочей памяти Лады. Это короткий список того, "
-    "что сейчас важно в её жизни и общении с людьми.\n\n"
+    "что сейчас важно в её общении с КОНКРЕТНЫМ человеком.\n\n"
     "В рабочей памяти живут:\n"
-    "- незавершённые темы и обещания (кто что обещал, кто о чём хотел поговорить)\n"
-    "- важные свежие факты о собеседниках (работа, планы, события, настроение)\n"
-    "- активные договорённости («должен ответить», «обещала рассказать»)\n"
-    "- то, что ты держишь в голове в последние 1-3 дня\n\n"
+    "- незавершённые темы и обещания\n"
+    "- важные свежие факты о собеседнике\n"
+    "- активные договорённости\n"
+    "- то, что ты держишь в голове по нему за последние 1-3 дня\n\n"
     "ФОРМАТ:\n"
-    "- markdown, группируй по пользователям: «### ID 123 (Имя)»\n"
-    "- под каждым — пункты через «- »\n"
-    "- максимум 30 строк всего\n\n"
+    "- ОДИН заголовок: «### ID <user_id> (<имя>)»\n"
+    "- под ним — пункты через «- »\n"
+    "- максимум 20 строк всего\n\n"
     "ПРАВИЛА:\n"
-    "- УДАЛЯЙ то, что уже неактуально или старше 3 дней.\n"
-    "- НЕ дублируй похожие пункты — объединяй в один.\n"
-    "- НЕ пиши общих вещей («человек человек», «мы общались»).\n"
-    "- НЕ пиши шаблонных фраз («как дела», «хорошего дня»).\n"
-    "- Если ничего важного не появилось — оставь как было.\n\n"
-    "Выведи ТОЛЬКО новый текст рабочей памяти (markdown), без пояснений."
+    "- Это память ТОЛЬКО об этом человеке.\n"
+    "- УДАЛЯЙ устаревшее (старше 3 дней).\n"
+    "- НЕ дублируй похожие пункты.\n"
+    "- НЕ пиши общих вещей и шаблонов.\n"
+    "- Если ничего важного — оставь как было.\n\n"
+    "Выведи ТОЛЬКО новый текст рабочей памяти (markdown)."
 )
 
 
-def load() -> str:
-    if WM_FILE.exists():
-        try:
-            return WM_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
+def load(user_id: int) -> str:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT content FROM working_memory WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row and row["content"]:
+        return row["content"].strip()
     return ""
 
 
-def save(text: str):
+def save(user_id: int, text: str):
     text = (text or "").strip()
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
-    WM_FILE.write_text(text, encoding="utf-8")
+    ts = datetime.now().isoformat(timespec="seconds")
+    with Transaction() as conn:
+        conn.execute(
+            "INSERT INTO working_memory (user_id, content, updated) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET content = excluded.content, "
+            "updated = excluded.updated",
+            (user_id, text, ts),
+        )
+
+
+def clear(user_id: int):
+    with Transaction() as conn:
+        conn.execute("DELETE FROM working_memory WHERE user_id = ?",
+                     (user_id,))
+
+
+def clear_all():
+    with Transaction() as conn:
+        conn.execute("DELETE FROM working_memory")
 
 
 def _is_low_quality(text: str) -> bool:
-    """Отсекаем пустое, слишком короткое, откровенный мусор."""
     if not text or len(text) < 20:
         return True
     low = text.lower().strip()
@@ -70,17 +80,9 @@ def _is_low_quality(text: str) -> bool:
     return False
 
 
-async def update_for_dialog(
-    user_id: int,
-    user_msg: str,
-    bot_reply: str,
-    user_display: str = "",
-) -> None:
-    """
-    Обновляет WM после диалога. Ошибки глотаем — это фон.
-    Вызывается через asyncio.create_task, не блокирует ответ.
-    """
-    current = load()
+async def update_for_dialog(user_id: int, user_msg: str, bot_reply: str,
+                            user_display: str = "") -> None:
+    current = load(user_id)
 
     name_hint = f" ({user_display})" if user_display else ""
     user_block = (
@@ -92,11 +94,12 @@ async def update_for_dialog(
     messages = [
         {"role": "system", "content": WM_UPDATE_PROMPT},
         {"role": "user", "content": (
-            f"ТЕКУЩАЯ РАБОЧАЯ ПАМЯТЬ:\n{current or '(пусто)'}\n\n"
+            f"ТЕКУЩАЯ РАБОЧАЯ ПАМЯТЬ ОБ ЭТОМ ЧЕЛОВЕКЕ (ID {user_id}):\n"
+            f"{current or '(пусто)'}\n\n"
             f"{user_block}\n"
             f"Сегодня: {datetime.now().strftime('%Y-%m-%d %H:%M')}.\n\n"
-            f"Обнови рабочую память: добавь важное из диалога, "
-            f"убери устаревшее, объедини похожее."
+            f"Обнови рабочую память ТОЛЬКО об этом человеке (ID {user_id}). "
+            f"Не добавляй сюда факты о других пользователях."
         )},
     ]
 
@@ -119,25 +122,20 @@ async def update_for_dialog(
     if _is_low_quality(text):
         return
 
-    save(text)
+    save(user_id, text)
     lines = text.count("\n") + 1
-    print(f"   📝 WM обновлена ({len(text)} симв., {lines} строк)")
+    print(f"   📝 WM обновлена для {user_id} "
+          f"({len(text)} симв., {lines} строк)")
 
 
-def as_context_block() -> str:
-    """Блок для вставки в промпт. Пустая строка если WM пуста."""
-    text = load()
+def as_context_block(user_id: int) -> str:
+    text = load(user_id)
     if not text:
         return ""
     return (
-        "=== РАБОЧАЯ ПАМЯТЬ (что у тебя сейчас на уме) ===\n"
+        "=== РАБОЧАЯ ПАМЯТЬ (что у тебя сейчас на уме про ЭТОГО человека) ===\n"
         f"{text}\n"
         "=== КОНЕЦ РАБОЧЕЙ ПАМЯТИ ===\n\n"
-        "(Это твоя краткосрочная память о последних днях. "
+        "(Это твоя краткосрочная память о нём за последние дни. "
         "Используй как контекст, но не цитируй дословно.)"
     )
-
-
-def clear():
-    if WM_FILE.exists():
-        WM_FILE.unlink()

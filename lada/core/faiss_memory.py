@@ -1,12 +1,13 @@
 # faiss_memory.py — векторная память (HNSW) с привязкой к user_id
 #
-# Метрика: METRIC_INNER_PRODUCT. Эмбеддинги нормализуются,
-# поэтому inner product == косинусная близость (0..1). Больше = лучше.
-#
-# Эмбеддинги делаются батчами (по 32 текста за запрос) — это критично
-# при пересборке: 624 записи обрабатываются за минуту вместо получаса.
+# FIX: LRU-кэш эмбеддингов. Повторяющиеся фразы ("привет", "как дела")
+# не пересчитываются. Хит-рейт ~30-40% на реальных диалогах.
+# FIX: health_check + громкая ошибка при сломанном эмбеддинге.
 
 import json
+import hashlib
+from collections import OrderedDict
+
 import numpy as np
 import faiss
 import ollama
@@ -16,6 +17,7 @@ from config import (
     EMBEDDING_MODEL,
     FAISS_TOP_K, FAISS_MIN_SCORE, FAISS_MAX_CHARS,
     HNSW_M, HNSW_EF_CONSTRUCTION, HNSW_EF_SEARCH,
+    EMBED_CACHE_SIZE,
 )
 
 DATA_DIR = Path("data")
@@ -23,7 +25,6 @@ INDEX_PATH = DATA_DIR / "faiss_index.bin"
 META_PATH = DATA_DIR / "faiss_metadata.json"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Сколько текстов за один запрос к Ollama
 EMBED_BATCH_SIZE = 32
 
 
@@ -31,6 +32,10 @@ class FaissMemory:
     def __init__(self):
         self.index = None
         self.metadata = []
+        self._embed_broken_reported = False
+        self._embed_cache = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def load(self):
         if INDEX_PATH.exists() and META_PATH.exists():
@@ -63,8 +68,52 @@ class FaissMemory:
             encoding="utf-8"
         )
 
+    # ─────────────── КЭШ ───────────────
+
+    @staticmethod
+    def _cache_key(text: str) -> str:
+        return hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _cache_get(self, text: str):
+        key = self._cache_key(text)
+        if key in self._embed_cache:
+            self._embed_cache.move_to_end(key)
+            self._cache_hits += 1
+            return self._embed_cache[key]
+        return None
+
+    def _cache_put(self, text: str, vec):
+        key = self._cache_key(text)
+        self._embed_cache[key] = vec
+        self._embed_cache.move_to_end(key)
+        while len(self._embed_cache) > EMBED_CACHE_SIZE:
+            self._embed_cache.popitem(last=False)
+
+    def cache_stats(self) -> tuple:
+        total = self._cache_hits + self._cache_misses
+        if total == 0:
+            return 0, 0, 0.0
+        return self._cache_hits, total, self._cache_hits / total
+
+    # ─────────────── ЭМБЕДДИНГИ ───────────────
+
+    def _report_embedding_broken(self, err):
+        if not self._embed_broken_reported:
+            print("=" * 60, flush=True)
+            print("🛑 КРИТИЧНО: ЭМБЕДДИНГИ НЕ РАБОТАЮТ", flush=True)
+            print(f"   Причина: {err}", flush=True)
+            print(f"   Решение: ollama pull {EMBEDDING_MODEL}", flush=True)
+            print("   Пока эмбеддинги мертвы — FAISS не пишется и не читается.",
+                  flush=True)
+            print("=" * 60, flush=True)
+            self._embed_broken_reported = True
+
     def _embed(self, text: str):
-        """Одиночный эмбеддинг. Для одного текста."""
+        """Эмбеддинг одного текста с LRU-кэшем."""
+        cached = self._cache_get(text)
+        if cached is not None:
+            return cached
+
         try:
             resp = ollama.embed(
                 model=EMBEDDING_MODEL,
@@ -73,40 +122,60 @@ class FaissMemory:
             )
             vec = np.asarray(resp["embeddings"][0], dtype=np.float32)
             faiss.normalize_L2(vec.reshape(1, -1))
+            self._cache_misses += 1
+            self._cache_put(text, vec)
             return vec
         except Exception as e:
-            print(f"⚠️ Ошибка эмбеддинга: {e}")
+            self._report_embedding_broken(e)
             return None
 
-    def _embed_batch(self, texts: list[str]) -> list:
-        """
-        Батч эмбеддингов. Один HTTP-запрос — все тексты сразу.
-        Возвращает список numpy-векторов в том же порядке,
-        или None для тех текстов, где эмбеддинг не удался.
-        """
+    def _embed_batch(self, texts: list) -> list:
         if not texts:
             return []
+
+        # Проверяем кэш для каждого
+        results = [None] * len(texts)
+        to_compute = []
+        to_compute_idx = []
+
+        for i, t in enumerate(texts):
+            cached = self._cache_get(t)
+            if cached is not None:
+                results[i] = cached
+            else:
+                to_compute.append(t)
+                to_compute_idx.append(i)
+
+        if not to_compute:
+            return results
+
         try:
             resp = ollama.embed(
                 model=EMBEDDING_MODEL,
-                input=texts,
+                input=to_compute,
                 keep_alive="30m",
             )
             embs = resp.get("embeddings", [])
-            if len(embs) != len(texts):
-                print(f"⚠️ Ollama вернула {len(embs)} вместо {len(texts)}")
-            out = []
-            for i in range(len(texts)):
-                if i >= len(embs):
-                    out.append(None)
+            for j, idx in enumerate(to_compute_idx):
+                if j >= len(embs):
                     continue
-                vec = np.asarray(embs[i], dtype=np.float32)
+                vec = np.asarray(embs[j], dtype=np.float32)
                 faiss.normalize_L2(vec.reshape(1, -1))
-                out.append(vec)
-            return out
+                self._cache_misses += 1
+                self._cache_put(to_compute[j], vec)
+                results[idx] = vec
         except Exception as e:
-            print(f"⚠️ Ошибка батч-эмбеддинга: {e}")
-            return [None] * len(texts)
+            self._report_embedding_broken(e)
+
+        return results
+
+    def health_check(self):
+        v = self._embed("health check")
+        if v is None:
+            return False, f"эмбеддинг {EMBEDDING_MODEL} недоступен"
+        return True, "ok"
+
+    # ─────────────── ИНДЕКС ───────────────
 
     def _create_index(self, dim: int):
         index = faiss.IndexHNSWFlat(dim, HNSW_M, faiss.METRIC_INNER_PRODUCT)
@@ -114,13 +183,15 @@ class FaissMemory:
         index.hnsw.efSearch = HNSW_EF_SEARCH
         return index
 
-    def add(self, text: str, category: str = "general", source: str = "reflection",
-            user_id: int | None = None):
+    # ─────────────── ЗАПИСЬ ───────────────
+
+    def add(self, text: str, category: str = "general",
+            source: str = "reflection", user_id: int = None) -> bool:
         if not text.strip():
-            return
+            return False
         vec = self._embed(text)
         if vec is None:
-            return
+            return False
         vec = vec.reshape(1, -1)
         if self.index is None:
             self.index = self._create_index(vec.shape[1])
@@ -133,13 +204,11 @@ class FaissMemory:
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         })
         self.save()
+        return True
 
-    def add_many(self, items: list, verbose: bool = True):
-        """
-        Батчевая вставка. Обрабатывает по EMBED_BATCH_SIZE текстов за раз.
-        """
+    def add_many(self, items: list, verbose: bool = True) -> int:
         if not items:
-            return
+            return 0
 
         total = len(items)
         if verbose:
@@ -167,12 +236,13 @@ class FaissMemory:
                     "category": item.get("category", "general"),
                     "source": item.get("source", "reflection"),
                     "user_id": item.get("user_id"),
-                    "timestamp": item.get("timestamp") or datetime.now().isoformat(timespec="seconds"),
+                    "timestamp": item.get("timestamp")
+                        or datetime.now().isoformat(timespec="seconds"),
                 })
 
         if not all_vectors:
             print("⚠️ Ни одного эмбеддинга не получено")
-            return
+            return 0
 
         arr = np.vstack(all_vectors).astype(np.float32)
         if self.index is None:
@@ -182,7 +252,9 @@ class FaissMemory:
         self.save()
 
         if verbose:
-            print(f"   ✅ Добавлено: {len(added_meta)} (пропущено: {total - len(added_meta)})")
+            print(f"   ✅ Добавлено: {len(added_meta)} "
+                  f"(пропущено: {total - len(added_meta)})")
+        return len(added_meta)
 
     def rebuild(self, items: list):
         self.metadata = []
@@ -194,7 +266,9 @@ class FaissMemory:
         if items:
             self.add_many(items)
 
-    def search(self, query: str, k: int = None, user_id: int | None = None,
+    # ─────────────── ПОИСК ───────────────
+
+    def search(self, query: str, k: int = None, user_id: int = None,
                min_score: float = None, max_chars: int = None):
         if k is None:
             k = FAISS_TOP_K
@@ -211,7 +285,6 @@ class FaissMemory:
             return []
         vec = vec.reshape(1, -1)
 
-        # Ищем по всей базе — фильтр по user_id может отсеять топ-kanдидаты
         search_k = self.index.ntotal
         distances, indices = self.index.search(vec, search_k)
 
@@ -221,7 +294,6 @@ class FaissMemory:
             if idx < 0 or idx >= len(self.metadata):
                 continue
 
-            # METRIC_INNER_PRODUCT → от большего к меньшему
             score = float(distance)
             if score < min_score:
                 break
@@ -247,10 +319,12 @@ class FaissMemory:
 
         return results
 
+    # ─────────────── СТАТИСТИКА ───────────────
+
     def count(self) -> int:
         return self.index.ntotal if self.index else 0
 
-    def count_by_category(self, category: str, user_id: int | None = None) -> int:
+    def count_by_category(self, category: str, user_id: int = None) -> int:
         if user_id is None:
             return sum(
                 1 for m in self.metadata

@@ -13,17 +13,18 @@ from config import (
     EMOTION_ENABLED, COOLDOWN_SECONDS,
 )
 from lada.core import users_names, user_city
-from lada.core import unread  # NEW
+from lada.core import unread
 from lada.core.llm import ask, ask_text
-from lada.core.memory import get_history, add_message
-from lada.core.faiss_memory import faiss_mem
-from lada.core.working_memory import update_for_dialog as wm_update  # NEW
+from lada.core.memory import get_history, add_message, add_silence_marker
+from lada.core.lancedb_memory import lance_mem as faiss_mem
+from lada.core.working_memory import update_for_dialog as wm_update
 from lada.brain import mood, image_policy, image_mood, will, relationship as rel
+from lada.brain import night_policy
 from lada.brain.relationship import (
     touch_first_seen, get_status, get_pending,
     accept_proposal, reject_proposal, record_proposal,
 )
-from lada.brain.emotions import evaluate_and_record
+from lada.brain.combined_eval import evaluate_and_update
 from lada.brain.initiative import touch_user_activity
 from lada.brain.monologue import get_recent_thoughts
 from lada.telegram.mode import should_reply
@@ -33,10 +34,12 @@ from lada.telegram.presence import set_online, touch_activity
 from lada.telegram.queue import QueuedMessage
 from lada.telegram import splitter, stickers
 from lada.tools import web_search
+from lada.tools import search_agent
 from lada.tools import image_gen
 from lada.app.client import get_client, message_queue, recent_photo_prompts
 from lada.app.utils import (
     log, log_thinking, detect_yes_no, strip_asterisk_actions,
+    strip_question_echo,
 )
 from lada.app.state_brief import build_state_brief
 from lada.app.commands import handle_owner_command
@@ -80,12 +83,11 @@ async def handler(event):
     if not text and not event.media:
         return
 
-    if user_id != OWNER_ID:
-        allowed, wait = is_allowed(user_id, COOLDOWN_SECONDS)
-        if not allowed:
-            log(f"⏸ Cooldown: {users_names.display_name(user_id)}, ждать {wait}с")
-            return
-        touch(user_id)
+    allowed, wait = is_allowed(user_id, COOLDOWN_SECONDS)
+    if not allowed:
+        log(f"⏸ Cooldown: {users_names.display_name(user_id)}, ждать {wait}с")
+        return
+    touch(user_id)
 
     try:
         sender = await event.get_sender()
@@ -115,7 +117,7 @@ async def handler(event):
         log(f"⚠️ Очередь переполнена, сообщение от {user_display} потеряно")
 
 
-async def process_batch(batch: list[QueuedMessage]):
+async def process_batch(batch: list):
     if not batch:
         return
 
@@ -125,7 +127,8 @@ async def process_batch(batch: list[QueuedMessage]):
     chat_id = batch[0].chat_id
     user_display = users_names.display_name(user_id)
 
-    log(f"📥 Из очереди: {len(batch)} сообщ. от {user_display} (осталось: {message_queue.size()})")
+    log(f"📥 Из очереди: {len(batch)} сообщ. от {user_display} "
+        f"(осталось: {message_queue.size()})")
 
     touch_activity()
     await set_online(client)
@@ -134,7 +137,7 @@ async def process_batch(batch: list[QueuedMessage]):
     except Exception as e:
         log(f"⚠️ Read: {e}")
 
-    parts: list[str] = []
+    parts: list = []
     for qm in batch:
         text = (qm.event.raw_text or "").strip()
         if text:
@@ -160,6 +163,32 @@ async def process_batch(batch: list[QueuedMessage]):
             detected = city_match.group(1).strip()
             user_city.set_city(user_id, detected)
             log(f"   🏙 Автоопределён город: {detected}")
+
+    if night_policy.detect_revoke_request(combined):
+        if night_policy.get_night_ok(user_id) == 1:
+            night_policy.revoke_night(user_id)
+            log(f"   🌙 Разрешение писать ночью отозвано")
+
+    if night_policy.get_night_pending(user_id):
+        answer = detect_yes_no(combined)
+        if answer == "yes":
+            night_policy.accept_night(user_id)
+            log(f"   🌙 Разрешение писать ночью: ДА")
+            add_message(
+                user_id, "system",
+                "[СИСТЕМА] Пользователь разрешил тебе писать ему ночью. "
+                "Пользуйся этим мягко, не злоупотребляй.",
+                max_history=MAX_HISTORY,
+            )
+        elif answer == "no":
+            night_policy.reject_night(user_id)
+            log(f"   🌙 Разрешение писать ночью: НЕТ")
+            add_message(
+                user_id, "system",
+                "[СИСТЕМА] Пользователь не разрешил писать ночью. "
+                "Не пиши ему ночью и не спрашивай об этом снова.",
+                max_history=MAX_HISTORY,
+            )
 
     pending = get_pending(user_id)
     if pending:
@@ -187,6 +216,8 @@ async def process_batch(batch: list[QueuedMessage]):
                 )
         else:
             log(f"   ⏳ Предложение '{pending}' ожидает, ответ неоднозначный")
+
+    history_for_search = get_history(user_id, limit=6)
 
     add_message(user_id, "user", combined, max_history=MAX_HISTORY)
     history = get_history(user_id, limit=MAX_HISTORY)
@@ -229,7 +260,49 @@ async def process_batch(batch: list[QueuedMessage]):
     )
     history = history + [{"role": "system", "content": brief}]
 
-    # NEW: непрочитанные (если накопились)
+    auto_search_block = None
+    if (WEB_SEARCH_ENABLED
+            and not force_search
+            and search_agent.available()):
+        decision = await asyncio.to_thread(
+            search_agent.decide_search, combined, history_for_search
+        )
+        if decision.get("search") and decision.get("query"):
+            log(f"   🔎 Search agent → «{decision['query']}» "
+                f"({decision.get('reason', '')[:70]})")
+            auto_search_block = await asyncio.to_thread(
+                web_search.search_and_format, decision["query"]
+            )
+        else:
+            log(f"   🔎 Search agent: не нужен "
+                f"({decision.get('reason', '')[:70]})")
+
+    if auto_search_block:
+        if "[SEARCH_FAILED]" in auto_search_block:
+            history = history + [
+                {"role": "system", "content": auto_search_block},
+                {"role": "system",
+                 "content": (
+                     "🔥 КРИТИЧНО: поиск НЕ ДАЛ результатов. "
+                     "Ты ОБЯЗАНА честно сказать «ничего конкретного не нашла». "
+                     "КАТЕГОРИЧЕСКИ запрещено выдумывать. "
+                     "Пример: «Слушай, полезла искать — пусто. Ничего "
+                     "конкретного. Может, ты сам глянешь? 🤔»"
+                 )},
+            ]
+        else:
+            history = history + [
+                {"role": "system", "content": auto_search_block},
+                {"role": "system",
+                 "content": (
+                     "🔥 ВАЖНО: используй ТОЛЬКО конкретные факты из "
+                     "результатов поиска. Отвечай 2-3 фактами (что, где, "
+                     "когда). НЕ пиши «какие-то события», «что-то происходит». "
+                     "Если конкретики по теме нет — скажи «ничего "
+                     "конкретного не нашла». Ничего не выдумывай."
+                 )},
+            ]
+
     unread_block = unread.as_context_block(user_id)
     if unread_block:
         history = history + [{"role": "system", "content": unread_block}]
@@ -271,7 +344,7 @@ async def process_batch(batch: list[QueuedMessage]):
                 if match:
                     query = match.group(1).strip()
                     if query:
-                        log(f"   🔍 Веб-поиск: {query}")
+                        log(f"   🔍 Веб-поиск (модель): {query}")
                         search_result = await asyncio.to_thread(
                             web_search.search_and_format, query
                         )
@@ -290,14 +363,67 @@ async def process_batch(batch: list[QueuedMessage]):
     if "[SEARCH]" in reply:
         reply = "🤔 Не нашла точный ответ."
 
+    _before = reply
+    reply = strip_question_echo(reply, combined)
+    if reply != _before:
+        log(f"   ✂️  Срезано эхо вопроса: «{_before[:40]}…»")
+
     reply, was_stripped = strip_asterisk_actions(reply)
     if was_stripped:
         log("   ✂️  Срезаны *действия* из ответа")
 
+    # ─── Модель решила промолчать ───
     if "[SILENCE]" in reply:
         log("   🤐 Модель решила промолчать.")
-        unread.append(user_id, combined)  # NEW
+        # FIX: маркер сохраняется как ASSISTANT-реплика — структура
+        # диалога остаётся user → assistant → user → assistant,
+        # и модель видит, что она уже участвовала в диалоге.
+        add_silence_marker(user_id, max_history=MAX_HISTORY)
+        unread.append(user_id, combined)
+
+        # FIX: обновляем эмоции и WM даже при молчании.
+        # Иначе настроение фиксируется, WM не обновляется — и она
+        # застревает в цикле «раздражена → молчит → остаётся раздражена».
+        async def _silent_processing():
+            await asyncio.sleep(3)
+            try:
+                await evaluate_and_update(
+                    user_id, combined, "[промолчала]", user_display
+                )
+            except Exception as e:
+                log(f"   ⚠️ silent combined_eval: {e}")
+            try:
+                await wm_update(user_id, combined, "[промолчала]", user_display)
+            except Exception as e:
+                log(f"   ⚠️ silent WM: {e}")
+
+        asyncio.create_task(_silent_processing())
         return
+
+    # ─── [REMEMBER] — сохранить факт в долгую память ───
+    remember_matches = re.findall(
+        r'\[REMEMBER\]\s*(.+?)(?=\n\[|\Z)', reply, re.DOTALL
+    )
+    if remember_matches:
+        for fact in remember_matches:
+            fact = fact.strip()
+            if not fact or len(fact) < 5:
+                continue
+            ok = faiss_mem.add(
+                fact,
+                category="observation",
+                source="explicit_remember",
+                user_id=user_id,
+            )
+            log(f"   💾 [REMEMBER] {'✓' if ok else '✗'}: {fact[:100]}")
+        # Вырезаем все маркеры из ответа
+        reply = re.sub(
+            r'\[REMEMBER\]\s*.+?(?=\n\[|\Z)', '', reply, flags=re.DOTALL
+        ).strip()
+        # Если после вырезания пусто — короткое подтверждение
+        if not reply.strip():
+            reply = "Запомнила."
+
 
     propose_match = re.search(r'\[PROPOSE:\s*(lover|husband)\s*\]', reply)
     if propose_match and not get_pending(user_id) and get_status(user_id) not in rel.SPECIAL_STATUSES:
@@ -305,6 +431,12 @@ async def process_batch(batch: list[QueuedMessage]):
         record_proposal(user_id, which)
         reply = reply.replace(propose_match.group(0), "").strip()
         log(f"   💗 Модель предложила отношения: {which}")
+
+    night_match = re.search(r'\[PROPOSE:\s*night\s*\]', reply)
+    if night_match and night_policy.can_ask_about_night(user_id):
+        night_policy.record_night_ask(user_id)
+        reply = reply.replace(night_match.group(0), "").strip()
+        log(f"   🌙 Модель спросила разрешение писать ночью")
 
     sticker_match = re.search(r'\[STICKER(?::\s*([^\]]+))?\]', reply)
     sticker_emoji = None
@@ -370,8 +502,26 @@ async def process_batch(batch: list[QueuedMessage]):
             ]
             reply = await asyncio.to_thread(ask_text, history_retry)
             if not reply.strip():
-                reply = "⚠️ Что-то у меня сбой. Повтори."
-                unread.append(user_id, combined)  # NEW
+                log("   🤐 Fallback тоже пусто, молчу")
+                add_silence_marker(user_id, max_history=MAX_HISTORY)
+                unread.append(user_id, combined)
+
+                async def _silent_processing_2():
+                    await asyncio.sleep(3)
+                    try:
+                        await evaluate_and_update(
+                            user_id, combined, "[промолчала]", user_display
+                        )
+                    except Exception as e:
+                        log(f"   ⚠️ silent combined_eval: {e}")
+                    try:
+                        await wm_update(user_id, combined, "[промолчала]",
+                                        user_display)
+                    except Exception as e:
+                        log(f"   ⚠️ silent WM: {e}")
+
+                asyncio.create_task(_silent_processing_2())
+                return
 
     if image_prompt:
         log(f"   🎨 Итоговый промпт ({image_subject}): {image_prompt[:140]}")
@@ -394,7 +544,7 @@ async def process_batch(batch: list[QueuedMessage]):
         try:
             sent_msgs = await splitter.send_in_parts(client, chat_id, reply)
             log(f"✅ Ответил ({user_display}, частей: {len(sent_msgs)})")
-            unread.mark_read(user_id)  # NEW: ответила — старые непрочитанные закрыты
+            unread.mark_read(user_id)
         except Exception as e:
             log(f"⚠️ Не удалось отправить: {e}")
 
@@ -438,17 +588,14 @@ async def process_batch(batch: list[QueuedMessage]):
             except Exception as e:
                 log(f"   ⚠️ Не удалось отправить изображение: {e}")
 
-    if EMOTION_ENABLED and not image_prompt:
-        asyncio.create_task(evaluate_and_record(combined, reply, user_id))
-    elif image_prompt:
-        log("   ⏭ Эмоции пропущены (VRAM занят после генерации)")
+    if EMOTION_ENABLED:
+        delay = 60 if image_prompt else 2
 
-    # NEW: рабочая память (в фоне)
-    async def _wm_update_later():
-        await asyncio.sleep(30 if image_prompt else 3)
-        try:
-            await wm_update(user_id, combined, reply, user_display)
-        except Exception as e:
-            log(f"   ⚠️ WM: {e}")
+        async def _combined_later():
+            await asyncio.sleep(delay)
+            try:
+                await evaluate_and_update(user_id, combined, reply, user_display)
+            except Exception as e:
+                log(f"   ⚠️ combined_eval: {e}")
 
-    asyncio.create_task(_wm_update_later())
+        asyncio.create_task(_combined_later())

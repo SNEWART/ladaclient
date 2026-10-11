@@ -1,14 +1,11 @@
 # emotions.py — эмоции, настроение, шкалы, trust, intimacy, наблюдения.
-#
-# Изменения:
-#   - LLM возвращает trust_delta и intimacy_delta
-#   - Негативные дельты умножаются на MOOD_NEGATIVE_MULTIPLIER
-#   - После обновления intimacy повышается статус (lover/husband)
+# Без батчинга. Один вызов LLM на сообщение. Trust/intimacy ≤ ±0.10.
 
+import json
 from datetime import datetime
 from pathlib import Path
 
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core.llm_json import chat_json
 from lada.brain import sins, mood, image_policy, relationship
 from config import (
@@ -38,30 +35,19 @@ EVAL_PROMPT = (
     "  },\n"
     '  "trust_delta": 0.0,\n'
     '  "intimacy_delta": 0.0,\n'
-    '  "observations": ["краткий факт о пользователе или пусто"]\n'
+    '  "observations": []\n'
     "}\n\n"
     "ПРАВИЛА:\n"
     "- Числа в sins_deltas: -3..3, обычно -1/0/1.\n"
-    "- trust_delta: от -0.15 до +0.15. СКОЛЬКО ДОВЕРИЯ изменилось.\n"
-    "  · комплимент, поддержка, искренность → +0.01..+0.05\n"
-    "  · грубость, унижение, ложь → -0.05..-0.15 (режь сильно)\n"
-    "  · нейтральный диалог → 0\n"
-    "- intimacy_delta: от -0.10 до +0.10. Насколько БЛИЖЕ стали.\n"
-    "  · личные темы, откровенность, флирт → +0.01..+0.05\n"
-    "  · грубость, хамство → -0.03..-0.10\n"
-    "  · просто болтовня → 0\n"
-    "- ВАЖНО: один негативный поступок должен перевешивать десять позитивных.\n"
-    "  Если пользователь грубит — trust_delta и intimacy_delta резко минус.\n"
-    "- emotion: если диалог живой — опиши что чувствовала. Если технический — SKIP.\n"
-    "- observations: 0-3 факта о пользователе (интересы, работа, привычки, обещания).\n"
-    "  Формулируй от третьего лица: «Он любит горы», «Работает программистом».\n"
-    "  НЕ пиши банальности («он человек», «мы общались»).\n"
-    "  Если нового ничего — пустой массив."
+    "- trust_delta: от -0.05 до +0.05. НЕ превышай.\n"
+    "- intimacy_delta: от -0.05 до +0.05. НЕ превышай.\n"
+    "- emotion: если диалог живой — опиши. Если технический — SKIP.\n"
+    "- observations: 0-2 факта о пользователе. От третьего лица. "
+    "Если нового ничего — пустой массив."
 )
 
 
 def _apply_asymmetric_multiplier(deltas: dict) -> dict:
-    """Негативные дельты усиливаем, позитивные — как есть."""
     out = {}
     for k, v in deltas.items():
         try:
@@ -76,7 +62,7 @@ def _apply_asymmetric_multiplier(deltas: dict) -> dict:
     return out
 
 
-async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None = None):
+async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int = None):
     if not EMOTION_ENABLED:
         return
     if len(user_msg) < 5 and len(bot_reply) < 20:
@@ -84,29 +70,28 @@ async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None
 
     messages = [
         {"role": "system", "content": EVAL_PROMPT},
-        {"role": "user", "content": f"Пользователь: {user_msg}\nЛада: {bot_reply}"},
+        {"role": "user",
+         "content": f"Пользователь: {user_msg}\nЛада: {bot_reply}"},
     ]
 
     data = await chat_json(messages, "emotions")
     if not isinstance(data, dict):
         return
 
-    # ─── Эмоция ───
     emotion = (data.get("emotion") or "").strip()
     if emotion and emotion.upper() != "SKIP" and len(emotion) > 5:
-        faiss_mem.add(emotion, category="emotion", source="emotional_diary", user_id=user_id)
+        faiss_mem.add(emotion, category="emotion",
+                      source="emotional_diary", user_id=user_id)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         with open(EMOTIONAL_DIARY, "a", encoding="utf-8") as f:
             f.write(f"\n[{ts}] {emotion}\n")
         print(f"   💭 Эмоция: {emotion[:80]}")
 
-    # ─── Настроение ───
     m = data.get("mood")
     if m:
         mood.set_mood(m)
         print(f"   🎭 Настроение: {m}")
 
-    # ─── Шкалы с асимметричным множителем ───
     deltas = data.get("sins_deltas") or {}
     if isinstance(deltas, dict):
         boosted = _apply_asymmetric_multiplier(deltas)
@@ -114,10 +99,10 @@ async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None
         changed = {k: v for k, v in boosted.items()
                    if isinstance(v, (int, float)) and abs(v) >= 1}
         if changed:
-            parts = [f"{k} {'+' if v > 0 else ''}{v:.1f}" for k, v in changed.items()]
+            parts = [f"{k} {'+' if v > 0 else ''}{v:.1f}"
+                     for k, v in changed.items()]
             print(f"   ⚖️ Шкалы: {', '.join(parts)}")
 
-    # ─── Trust и intimacy ───
     if user_id is not None:
         try:
             trust_delta = float(data.get("trust_delta") or 0.0)
@@ -128,7 +113,9 @@ async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None
         except (TypeError, ValueError):
             intimacy_delta = 0.0
 
-        # усиливаем негативные дельты
+        trust_delta = max(-0.10, min(0.10, trust_delta))
+        intimacy_delta = max(-0.10, min(0.10, intimacy_delta))
+
         if trust_delta < 0:
             trust_delta *= MOOD_NEGATIVE_MULTIPLIER
         if intimacy_delta < 0:
@@ -141,18 +128,20 @@ async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None
             new_trust = max(0.0, min(1.0, current_trust + trust_delta))
             new_intimacy = max(0.0, min(1.0, current_intimacy + intimacy_delta))
 
-            image_policy.set_trust(user_id, trust=new_trust, intimacy=new_intimacy)
+            image_policy.set_trust(user_id, trust=new_trust,
+                                    intimacy=new_intimacy)
 
-            print(f"   🤝 trust: {current_trust:.2f} → {new_trust:.2f} ({trust_delta:+.3f})")
-            print(f"   💗 intimacy: {current_intimacy:.2f} → {new_intimacy:.2f} ({intimacy_delta:+.3f})")
+            print(f"   🤝 trust: {current_trust:.2f} → {new_trust:.2f} "
+                  f"({trust_delta:+.3f})")
+            print(f"   💗 intimacy: {current_intimacy:.2f} → {new_intimacy:.2f} "
+                  f"({intimacy_delta:+.3f})")
 
-            # Обновляем статус по новой intimacy
             relationship.update_status_from_intimacy(user_id, new_intimacy)
             new_status = relationship.get_status(user_id)
             if new_status in relationship.SPECIAL_STATUSES:
-                print(f"   💍 Статус: {relationship.get_status_label(user_id)}")
+                print(f"   💍 Статус: "
+                      f"{relationship.get_status_label(user_id)}")
 
-    # ─── Наблюдения ───
     observations = data.get("observations") or []
     if isinstance(observations, list) and user_id is not None:
         for obs in observations:
@@ -161,5 +150,7 @@ async def evaluate_and_record(user_msg: str, bot_reply: str, user_id: int | None
             obs = obs.strip()
             if len(obs) < 10:
                 continue
-            faiss_mem.add(obs, category="observation", source="dialog", user_id=user_id)
-            print(f"   👁 Наблюдение: {obs}")
+            ok = faiss_mem.add(obs, category="observation",
+                               source="dialog", user_id=user_id)
+            print(f"   👁 Наблюдение: {obs}" +
+                  ("" if ok else "  ⚠️ НЕ СОХРАНЕНО"))

@@ -1,43 +1,24 @@
-# cooldown.py — защита от спама: не отвечать одному пользователю слишком часто
+# cooldown.py — защита от спама (SQLite)
 
-import json
-from pathlib import Path
 from datetime import datetime
 
-FILE = Path("data") / "cooldown.json"
-FILE.parent.mkdir(exist_ok=True)
+from lada.core.db import get_conn, ensure_user, Transaction
 
 
-def _load() -> dict:
-    if FILE.exists():
-        try:
-            return json.loads(FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save(d: dict):
-    FILE.write_text(
-        json.dumps(d, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-
-def is_allowed(user_id: int, cooldown_seconds: int) -> tuple[bool, int]:
-    """
-    Возвращает (разрешено_ли_ответить, сколько_секунд_ждать).
-    """
+def is_allowed(user_id: int, cooldown_seconds: int) -> tuple:
     if cooldown_seconds <= 0:
         return True, 0
 
-    data = _load()
-    last = data.get(str(user_id))
-    if not last:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT touched_at FROM cooldowns WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["touched_at"]:
         return True, 0
 
     try:
-        last_dt = datetime.fromisoformat(last)
+        last_dt = datetime.fromisoformat(row["touched_at"])
     except Exception:
         return True, 0
 
@@ -48,7 +29,11 @@ def is_allowed(user_id: int, cooldown_seconds: int) -> tuple[bool, int]:
 
 
 def touch(user_id: int):
-    """Отмечает момент ответа для пользователя."""
-    data = _load()
-    data[str(user_id)] = datetime.now().isoformat(timespec="seconds")
-    _save(data)
+    ts = datetime.now().isoformat(timespec="seconds")
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "INSERT INTO cooldowns (user_id, touched_at) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET touched_at = excluded.touched_at",
+            (user_id, ts),
+        )

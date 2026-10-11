@@ -1,10 +1,8 @@
 # splitter.py — вероятностная разбивка ответа на несколько сообщений
 #
-# Улучшения:
-#   - Не режет *действия в звёздочках* посередине.
-#   - Если часть всё равно длинная (> MAX_PART_LEN), режет по запятым,
-#     потом по пробелам.
-#   - Действия старается оставлять рядом с текстом, к которому привязаны.
+# FIX: склейка коротких первых частей. "А ты?" (8 симв) раньше летел
+# отдельным пузырём и выглядел как бред. Теперь части короче 25 симв
+# приклеиваются к следующей.
 
 import asyncio
 import random
@@ -16,24 +14,22 @@ from config import (
     SPLIT_BETWEEN_DELAY,
 )
 
-# Максимум символов в одном сообщении. Если больше — режем принудительно.
 MAX_PART_LEN = 220
+MIN_FIRST_PART_LEN = 25
 
 
-def _split_by_sentences(text: str) -> list[str]:
+def _split_by_sentences(text: str) -> list:
     """Разбивает по предложениям. Действия в звёздочках не ломает."""
-    # Защищаем *действия* — заменяем на маркер, чтобы re.split не тронул
     protected = []
+
     def protect(m):
         protected.append(m.group(0))
         return f"\x00{len(protected)-1}\x00"
 
     text_safe = re.sub(r'\*[^*\n]+\*', protect, text)
 
-    # Режем по . ! ? … и пустым строкам
     parts = re.split(r'(?<=[.!?…])\s+|\n{2,}', text_safe)
 
-    # Восстанавливаем *действия*
     restored = []
     for p in parts:
         p = re.sub(r'\x00(\d+)\x00', lambda m: protected[int(m.group(1))], p)
@@ -43,16 +39,13 @@ def _split_by_sentences(text: str) -> list[str]:
     return restored
 
 
-def _hard_wrap(text: str, max_len: int = MAX_PART_LEN) -> list[str]:
-    """
-    Принудительно режет длинный текст на части <= max_len.
-    Сначала по запятым, потом по пробелам. Действия не рвёт.
-    """
+def _hard_wrap(text: str, max_len: int = MAX_PART_LEN) -> list:
+    """Принудительно режет длинный текст на части <= max_len."""
     if len(text) <= max_len:
         return [text]
 
-    # Защищаем *действия*
     protected = []
+
     def protect(m):
         protected.append(m.group(0))
         return f"\x00{len(protected)-1}\x00"
@@ -60,7 +53,6 @@ def _hard_wrap(text: str, max_len: int = MAX_PART_LEN) -> list[str]:
     safe = re.sub(r'\*[^*\n]+\*', protect, text)
 
     chunks = []
-    # Сначала пробуем резать по запятым, точкам с запятой, тире
     pieces = re.split(r'(?<=[,;—:])\s+', safe)
 
     current = ""
@@ -76,7 +68,6 @@ def _hard_wrap(text: str, max_len: int = MAX_PART_LEN) -> list[str]:
             chunks.append(current)
             current = piece
 
-        # Если отдельный кусок сам больше max_len — режем по пробелам
         while len(current) > max_len:
             space_idx = current.rfind(" ", 0, max_len)
             if space_idx <= 0:
@@ -87,7 +78,6 @@ def _hard_wrap(text: str, max_len: int = MAX_PART_LEN) -> list[str]:
     if current:
         chunks.append(current)
 
-    # Восстанавливаем *действия*
     restored = []
     for c in chunks:
         c = re.sub(r'\x00(\d+)\x00', lambda m: protected[int(m.group(1))], c)
@@ -103,6 +93,8 @@ def split_text(text: str,
     """
     Разбивает текст на части по предложениям.
     Дополнительно режет слишком длинные части.
+    FIX: короткие первые части (< MIN_FIRST_PART_LEN) склеиваются
+    со следующими — не отделяются в самостоятельный пузырь.
     """
     max_parts = max_parts or SPLIT_MAX_PARTS
     min_len = min_len or SPLIT_MIN_LEN
@@ -113,14 +105,27 @@ def split_text(text: str,
     if len(text) < min_len:
         return [text]
 
-    # Шаг 1: разбиваем по предложениям
     parts = _split_by_sentences(text)
 
+    # FIX: склейка коротких частей в начале
+    merged = []
+    buffer = ""
+    for p in parts:
+        if not buffer:
+            buffer = p
+            continue
+        if len(buffer) < MIN_FIRST_PART_LEN:
+            buffer = buffer + " " + p
+        else:
+            merged.append(buffer)
+            buffer = p
+    if buffer:
+        merged.append(buffer)
+    parts = merged
+
     if len(parts) <= 1:
-        # Не получилось разбить по предложениям — режем принудительно
         return _hard_wrap(text)
 
-    # Шаг 2: каждую длинную часть дорезаем
     expanded = []
     for p in parts:
         if len(p) > MAX_PART_LEN:
@@ -132,7 +137,6 @@ def split_text(text: str,
     if len(parts) <= 1:
         return [text]
 
-    # Шаг 3: если частей больше max_parts — группируем
     if len(parts) <= max_parts:
         return parts
 
@@ -147,7 +151,6 @@ def split_text(text: str,
         if not g:
             continue
         chunk = " ".join(g)
-        # если получившийся блок всё равно длинный — дорезаем
         if len(chunk) > MAX_PART_LEN:
             result.extend(_hard_wrap(chunk))
         else:
@@ -165,10 +168,7 @@ async def send_in_parts(client, chat_id: int, text: str) -> list:
     Отправляет текст одним или несколькими сообщениями.
     Решение о разбивке — вероятностное.
     """
-    # Длинный текст режем всегда, короткий — как раньше
     if len(text) >= SPLIT_MIN_LEN:
-        # если есть длинный блок с действиями — режем принудительно,
-        # даже если обычно не делим
         has_long_block = len(text) > MAX_PART_LEN * 2
 
         if has_long_block or random.random() < SPLIT_PROBABILITY:

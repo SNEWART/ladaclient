@@ -1,33 +1,30 @@
 # sleep.py — консолидация памяти («сон»).
 #
-# Переписано: вместо «все старые записи в один промпт» идёт
-# батчевая обработка. Каждый батч (25 записей) сжимается отдельным
-# запросом к LLM. За один «сон» обрабатывается до N батчей,
-# остальные остаются на следующий раз (чтобы не долбить LLM).
+# Бэкап теперь целиком копирует data/lancedb/, а не старые FAISS-файлы.
 
 import asyncio
 import re
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
+
 import ollama
 
 from config import (
     MODEL, SLEEP_INTERVAL_HOURS,
     SLEEP_DAYS_THRESHOLD, SLEEP_MIN_OLD,
-    SLEEP_BACKUP_KEEP
+    SLEEP_BACKUP_KEEP,
 )
-from lada.core.faiss_memory import faiss_mem
+from lada.core.lancedb_memory import lance_mem as faiss_mem
 
 SLEEP_LOG = Path("data") / "sleep.log"
 BACKUP_DIR = Path("data") / "backups"
+LANCEDB_DIR = Path("data") / "lancedb"
 
 SLEEP_LOG.parent.mkdir(exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Размер батча для одного запроса к LLM
 CONSOLIDATION_BATCH = 25
-# Сколько батчей максимум обрабатываем за один сон
 MAX_BATCHES_PER_RUN = 4
 
 
@@ -42,34 +39,37 @@ CONSOLIDATION_PROMPT = (
 )
 
 
-def backup_faiss() -> str:
+def backup_lancedb() -> str:
+    """Копирует всю папку data/lancedb/ в data/backups/lancedb_<ts>/."""
+    if not LANCEDB_DIR.exists():
+        return "Бэкап: lancedb не найден"
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    idx_src = Path("data") / "faiss_index.bin"
-    meta_src = Path("data") / "faiss_metadata.json"
+    dst = BACKUP_DIR / f"lancedb_{ts}"
+    try:
+        shutil.copytree(LANCEDB_DIR, dst)
+    except Exception as e:
+        return f"Бэкап LanceDB: ошибка {e}"
 
-    saved = []
-    if idx_src.exists():
-        dst = BACKUP_DIR / f"faiss_index_{ts}.bin"
-        shutil.copy2(idx_src, dst)
-        saved.append(dst.name)
-    if meta_src.exists():
-        dst = BACKUP_DIR / f"faiss_metadata_{ts}.json"
-        shutil.copy2(meta_src, dst)
-        saved.append(dst.name)
-
-    all_files = sorted(BACKUP_DIR.glob("faiss_*"), key=lambda p: p.stat().st_mtime, reverse=True)
-    to_keep = SLEEP_BACKUP_KEEP * 2
-    for old in all_files[to_keep:]:
+    # Оставляем последние N бэкапов
+    backups = sorted(
+        BACKUP_DIR.glob("lancedb_*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in backups[SLEEP_BACKUP_KEEP:]:
         try:
-            old.unlink()
+            if old.is_dir():
+                shutil.rmtree(old)
+            else:
+                old.unlink()
         except Exception:
             pass
 
-    return f"Бэкап: {', '.join(saved) if saved else 'нет файлов'}"
+    return f"Бэкап LanceDB: {dst.name}"
 
 
-async def _consolidate_batch(batch: list[dict]) -> list[dict]:
-    """Один запрос к LLM для батча записей. Возвращает список новых записей."""
+async def _consolidate_batch(batch: list) -> list:
     texts = "\n".join(
         f"- [{it.get('category', '?')}] {it['text'][:200]}"
         for it in batch
@@ -120,36 +120,47 @@ async def _consolidate_batch(batch: list[dict]) -> list[dict]:
     return new_items
 
 
-async def consolidate(days_threshold: int = None, min_old: int = None) -> str:
+async def consolidate(days_threshold: int = None, min_old: int = None,
+                       force: bool = False) -> str:
     if days_threshold is None:
         days_threshold = SLEEP_DAYS_THRESHOLD
     if min_old is None:
         min_old = SLEEP_MIN_OLD
 
-    all_meta = faiss_mem.metadata
-    if len(all_meta) < min_old:
-        return f"Слишком мало записей ({len(all_meta)})."
+    all_meta = list(faiss_mem.metadata)
+    if not all_meta:
+        return "⚠️ Память пуста. Нечего консолидировать."
 
-    cutoff = datetime.now() - timedelta(days=days_threshold)
-    fresh, old = [], []
-    for item in all_meta:
-        ts = item.get("timestamp")
-        try:
-            dt = datetime.fromisoformat(ts) if ts else None
-        except Exception:
-            dt = None
-        if dt and dt >= cutoff:
-            fresh.append(item)
-        else:
-            old.append(item)
+    if force:
+        old = sorted(all_meta, key=lambda m: m.get("timestamp", "") or "")
+        fresh = []
+        if len(old) < 3:
+            return f"⚠️ Слишком мало записей ({len(old)}). Нужно ≥3."
+    else:
+        if len(all_meta) < min_old:
+            return f"⚠️ Слишком мало записей ({len(all_meta)})."
+        cutoff = datetime.now() - timedelta(days=days_threshold)
+        fresh, old = [], []
+        for item in all_meta:
+            ts = item.get("timestamp")
+            try:
+                dt = datetime.fromisoformat(ts) if ts else None
+            except Exception:
+                dt = None
+            if dt and dt >= cutoff:
+                fresh.append(item)
+            else:
+                old.append(item)
+        if len(old) < min_old:
+            return (
+                f"💤 Нечего консолидировать: все {len(all_meta)} записей "
+                f"свежее {days_threshold} дн. Используй кнопку "
+                f"«Сон (форс)» для ручной консолидации."
+            )
 
-    if len(old) < min_old:
-        return f"Старых записей недостаточно ({len(old)})."
-
-    backup_info = backup_faiss()
+    backup_info = backup_lancedb()
     print(f"   💾 {backup_info}")
 
-    # ─── Батчи ───
     batches = [
         old[i:i + CONSOLIDATION_BATCH]
         for i in range(0, len(old), CONSOLIDATION_BATCH)
@@ -161,7 +172,6 @@ async def consolidate(days_threshold: int = None, min_old: int = None) -> str:
     print(f"   📦 Старых записей: {len(old)}, батчей: {len(batches)} "
           f"(обработаем {len(process_batches)})")
 
-    # ─── Обработка ───
     all_new = []
     for i, batch in enumerate(process_batches, 1):
         print(f"   [{i}/{len(process_batches)}] батч из {len(batch)} записей...")
@@ -170,35 +180,33 @@ async def consolidate(days_threshold: int = None, min_old: int = None) -> str:
             all_new.extend(new_items)
             print(f"      → {len(new_items)} новых")
         else:
-            print(f"      → пусто, пропускаю")
-            # если батч не сжался — оставляем оригиналы
+            print(f"      → пусто, оставляю оригиналы")
             unprocessed_old.extend(batch)
 
     if not all_new:
         return "⚠️ Модель не выдала консолидированных записей."
 
-    # ─── Пересборка: свежие + необработанные старые + новые ───
     faiss_mem.rebuild(fresh + unprocessed_old + all_new)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     with open(SLEEP_LOG, "a", encoding="utf-8") as f:
-        f.write(f"\n=== SLEEP {timestamp} ===\n")
+        f.write(f"\n=== SLEEP {timestamp} "
+                f"{'(FORCED)' if force else ''} ===\n")
         f.write(f"Было записей: {len(all_meta)}\n")
         f.write(f"  старых: {len(old)}\n")
-        f.write(f"  обработано в этом сне: {processed_count}\n")
-        f.write(f"  отложено на следующий: {len(unprocessed_old)}\n")
+        f.write(f"  обработано: {processed_count}\n")
+        f.write(f"  отложено: {len(unprocessed_old)}\n")
         f.write(f"  свежих: {len(fresh)}\n")
-        f.write(f"Создано консолидированных: {len(all_new)}\n")
-        f.write(f"Итог: {len(fresh) + len(unprocessed_old) + len(all_new)}\n")
+        f.write(f"Создано: {len(all_new)}\n")
         f.write(f"{backup_info}\n")
-        f.write("--- Консолидированные записи ---\n")
+        f.write("--- Консолидированные ---\n")
         for it in all_new:
             f.write(f"[{it['category']}] {it['text']}\n")
 
     return (
-        f"Было {len(all_meta)}, стало {len(fresh) + len(unprocessed_old) + len(all_new)}. "
-        f"Обработано старых: {processed_count} → {len(all_new)}. "
-        f"Отложено: {len(unprocessed_old)}."
+        f"Было {len(all_meta)}, стало "
+        f"{len(fresh) + len(unprocessed_old) + len(all_new)}. "
+        f"Обработано старых: {processed_count} → {len(all_new)}."
     )
 
 

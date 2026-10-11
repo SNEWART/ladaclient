@@ -1,18 +1,10 @@
-# image_policy.py — политика допуска к генерации изображений.
-#
-# Дополнения:
-#   - get_global_cap: если у кого-то есть lover/husband, остальным cap 6
-#   - adjust_trust: ручное изменение trust/intimacy из emotions.py
+# image_policy.py — политика допуска к генерации изображений (SQLite)
 
-import json
-from pathlib import Path
 from datetime import datetime
 
+from lada.core.db import get_conn, ensure_user, Transaction
 from lada.brain.relationship import familiarity, familiarity_label
 from lada.brain import sins, mood
-
-TRUST_FILE = Path("data") / "user_trust.json"
-TRUST_FILE.parent.mkdir(exist_ok=True)
 
 
 LEVEL_LABELS = {
@@ -34,12 +26,14 @@ INITIATIVE_MAX_LEVEL = 3
 LEVEL_KEYWORDS = {
     9: [
         "nude", "naked", "topless", "bottomless", "nsfw", "explicit",
-        "sex", "sexual", "genitals", "pussy", "dick", "cock", "cum",
-        "orgasm", "nipples", "areola", "completely nude", "bare skin",
-        "no clothing", "undressed", "unclothed", "without clothes",
-        "bare breasts", "bare chest", "bare ass", "naked body",
-        "голая", "голый", "голое", "обнаж", "без одежды", "без белья",
-        "нюд", "ню", "сиськи", "грудь голая", "голышом", "раздет",
+        "sex", "sexy", "genitals", "pussy", "dick", "cock", "cum",
+        "orgasm", "nipples", "areola", "completely naked", "naked skin",
+        "without clothes", "undressed", "without clothes",
+        "naked breasts", "naked ass", "naked body",
+        "naked", "naked", "naked", "naked", "without clothes", "without underwear",
+        "nudity", "nudity", "boobs", "bare breasts", "barefoot", "undressed", "cums",
+        "in mouth", "in hand", "hand on", "vagina", "sucks", "on dick", "dick face",
+        "dick vagina", "smooth", "wet", "in cum",
     ],
     8: [
         "erotic", "seductive", "sensual", "provocative pose",
@@ -96,95 +90,98 @@ def _detect_level(scene: str) -> int:
 
 
 # ─────────────── TRUST / INTIMACY ───────────────
-def _load_trust_data() -> dict:
-    if TRUST_FILE.exists():
-        try:
-            return json.loads(TRUST_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_trust_data(data: dict):
-    TRUST_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
 
 def get_trust(user_id: int) -> float:
-    data = _load_trust_data()
-    entry = data.get(str(user_id), {})
-    if "trust" in entry:
-        return float(entry["trust"])
-    return familiarity(user_id)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT trust FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None or row["trust"] is None:
+        return familiarity(user_id)
+    return float(row["trust"])
 
 
 def get_intimacy(user_id: int) -> float:
-    data = _load_trust_data()
-    entry = data.get(str(user_id), {})
-    return float(entry.get("intimacy", 0.0))
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT intimacy FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None or row["intimacy"] is None:
+        return 0.0
+    return float(row["intimacy"])
 
 
 def set_trust(user_id: int, trust: float = None, intimacy: float = None):
-    data = _load_trust_data()
-    key = str(user_id)
-    if key not in data:
-        data[key] = {}
-    if trust is not None:
-        data[key]["trust"] = max(0.0, min(1.0, float(trust)))
-    if intimacy is not None:
-        data[key]["intimacy"] = max(0.0, min(1.0, float(intimacy)))
-    data[key]["updated"] = datetime.now().isoformat(timespec="seconds")
-    _save_trust_data(data)
+    ts = datetime.now().isoformat(timespec="seconds")
+    with Transaction() as conn:
+        ensure_user(user_id)
+        sets = []
+        params = []
+        if trust is not None:
+            sets.append("trust = ?")
+            params.append(max(0.0, min(1.0, float(trust))))
+        if intimacy is not None:
+            sets.append("intimacy = ?")
+            params.append(max(0.0, min(1.0, float(intimacy))))
+        if not sets:
+            return
+        sets.append("updated = ?")
+        params.append(ts)
+        params.append(user_id)
+        conn.execute(
+            f"UPDATE user_state SET {', '.join(sets)} WHERE user_id = ?",
+            params,
+        )
 
 
-def adjust_trust(user_id: int, trust_delta: float = 0.0, intimacy_delta: float = 0.0):
-    """Прибавляет дельты к trust и intimacy, обрезает в [0,1]."""
-    data = _load_trust_data()
-    key = str(user_id)
-    if key not in data:
-        data[key] = {}
-
-    current_trust = float(data[key].get("trust", familiarity(user_id)))
-    current_intimacy = float(data[key].get("intimacy", 0.0))
-
+def adjust_trust(user_id: int, trust_delta: float = 0.0,
+                 intimacy_delta: float = 0.0):
+    current_trust = get_trust(user_id)
+    current_intimacy = get_intimacy(user_id)
     new_trust = max(0.0, min(1.0, current_trust + trust_delta))
     new_intimacy = max(0.0, min(1.0, current_intimacy + intimacy_delta))
-
-    data[key]["trust"] = new_trust
-    data[key]["intimacy"] = new_intimacy
-    data[key]["updated"] = datetime.now().isoformat(timespec="seconds")
-    _save_trust_data(data)
+    set_trust(user_id, trust=new_trust, intimacy=new_intimacy)
 
 
-def get_max_level_override(user_id: int) -> int | None:
-    data = _load_trust_data()
-    entry = data.get(str(user_id), {})
-    val = entry.get("max_level")
+def get_max_level_override(user_id: int):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT max_level_override FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    val = row["max_level_override"]
     if val is None:
         return None
     try:
-        v = int(val)
+        return max(0, min(9, int(val)))
     except (TypeError, ValueError):
         return None
-    return max(0, min(9, v))
 
 
-def set_max_level_override(user_id: int, level: int | None):
-    data = _load_trust_data()
-    key = str(user_id)
-    if key not in data:
-        data[key] = {}
-    if level is None:
-        data[key].pop("max_level", None)
-    else:
-        data[key]["max_level"] = max(0, min(9, int(level)))
-    data[key]["updated"] = datetime.now().isoformat(timespec="seconds")
-    _save_trust_data(data)
+def set_max_level_override(user_id: int, level):
+    ts = datetime.now().isoformat(timespec="seconds")
+    with Transaction() as conn:
+        ensure_user(user_id)
+        if level is None:
+            conn.execute(
+                "UPDATE user_state SET max_level_override = NULL, "
+                "updated = ? WHERE user_id = ?",
+                (ts, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE user_state SET max_level_override = ?, "
+                "updated = ? WHERE user_id = ?",
+                (max(0, min(9, int(level))), ts, user_id),
+            )
 
 
 # ─────────────── УРОВНИ ───────────────
+
 def _max_level_for_user(user_id: int) -> int:
     trust = get_trust(user_id)
     intimacy = get_intimacy(user_id)
@@ -251,7 +248,6 @@ def effective_max_level(user_id: int) -> int:
     if get_intimacy(user_id) < 0.3:
         effective = min(effective, 6)
 
-    # ─── Глобальный cap при наличии lover/husband ───
     try:
         from lada.brain.relationship import get_global_cap
         global_cap = get_global_cap(user_id)
@@ -271,19 +267,14 @@ def is_explicit_nsfw_request(message: str) -> bool:
     return False
 
 
-def check_allowed(
-    user_id: int,
-    scene: str,
-    source: str = "chat",
-    user_explicit_nsfw: bool = False,
-) -> tuple:
+def check_allowed(user_id: int, scene: str, source: str = "chat",
+                  user_explicit_nsfw: bool = False):
     level = _detect_level(scene)
     label = LEVEL_LABELS[level]
 
     if source == "initiative":
         user_max = effective_max_level(user_id)
         cap = min(INITIATIVE_MAX_LEVEL, user_max)
-
         if level > cap:
             return False, (
                 f"инициатива ограничена уровнем {cap} "
@@ -302,7 +293,7 @@ def check_allowed(
         from lada.brain.relationship import get_global_cap
         global_cap = get_global_cap(user_id)
         if global_cap is not None and level > global_cap:
-            reason += f", глобальный cap={global_cap} (у кого-то есть lover/husband)"
+            reason += f", глобальный cap={global_cap}"
     except Exception:
         pass
 
@@ -313,7 +304,6 @@ def check_allowed(
 
 
 def explain_refusal(user_id: int, scene: str) -> str:
-    # FIX: защита от None/пустой сцены
     if not scene:
         return "Не могу это показать. Давай что-то другое?"
 
@@ -388,4 +378,17 @@ def debug_state(user_id: int, scene: str) -> str:
 
 
 def list_trusts() -> dict:
-    return _load_trust_data()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT user_id, trust, intimacy, max_level_override, updated "
+        "FROM user_state"
+    ).fetchall()
+    out = {}
+    for r in rows:
+        out[str(r["user_id"])] = {
+            "trust": r["trust"],
+            "intimacy": r["intimacy"],
+            "max_level": r["max_level_override"],
+            "updated": r["updated"],
+        }
+    return out

@@ -1,11 +1,11 @@
-# loops.py — фоновые задачи: веб-сервер, регрессия шкал
+# loops.py — фоновые задачи: веб-сервер, регрессия шкал и настроения
 
 import asyncio
 
 import uvicorn
 
 from config import WEB_PORT
-from lada.brain import sins
+from lada.brain import sins, mood
 from lada.app.utils import log
 
 
@@ -24,5 +24,7 @@ async def sins_regression_loop():
         await asyncio.sleep(3600)
         try:
             sins.regress_toward_neutral(0.5)
+            # FIX: регрессия настроения — чтобы она не застревала
+            mood.regress_if_stale()
         except Exception as e:
             log(f"⚠️ Ошибка регрессии шкал: {e}")

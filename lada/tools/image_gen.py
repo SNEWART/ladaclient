@@ -34,7 +34,7 @@ PET_SEED = 774216091
 DEFAULT_WIDTH = 544
 DEFAULT_HEIGHT = 768
 DEFAULT_STEPS = 22
-DEFAULT_CFG = 8.0
+DEFAULT_CFG = 6.0
 DEFAULT_SAMPLER = "Euler a"
 
 QUALITY_PREFIX = "masterpiece, best quality, highly detailed, absurdres"

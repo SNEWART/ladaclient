@@ -22,6 +22,8 @@ IGNORED_FILES = {"run.py"}
 IGNORED_DIRS = {
     "venv", ".venv", "data", "__pycache__", ".git",
     "persona", "tests", ".pytest_cache",
+    ".idea", ".vscode", ".mypy_cache", ".ruff_cache",
+    "backups", "_backup_manual",
 }
 
 RESTART_DELAYS = [2, 4, 8, 16, 30]

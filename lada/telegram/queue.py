@@ -1,10 +1,19 @@
-# queue.py — очередь сообщений с возможностью удаления
+# queue.py — очередь сообщений с учётом печати пользователя.
+#
+# FIX: после debounce проверяем, печатает ли пользователь.
+# Если да — продлеваем ожидание. Максимум MAX_TYPING_EXTENSIONS раз.
 
 import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Awaitable
+from typing import Callable
+
+from lada.app import typing_tracker
+
+
+MAX_TYPING_EXTENSIONS = 5
+TYPING_EXTENSION_WINDOW = 3.0
 
 
 @dataclass
@@ -18,29 +27,15 @@ class QueuedMessage:
 
 
 class MessageQueue:
-    """
-    Очередь сообщений на list + asyncio.Condition.
-    Поддерживает удаление по индексу и просмотр состояния (для UI).
-    Пока сообщение в очереди — оно не прочитано в Telegram.
-    """
-
-    def __init__(
-        self,
-        worker_count: int = 1,
-        max_size: int = 1000,
-        debounce_secs: float = 1.5,
-    ):
+    def __init__(self, worker_count=1, max_size=1000, debounce_secs=1.5):
         self.worker_count = worker_count
         self.max_size = max_size
         self.debounce_secs = debounce_secs
-
-        self._items: list[QueuedMessage] = []
+        self._items = []
         self._cond = asyncio.Condition()
-        self._workers: list[asyncio.Task] = []
-        self._handler: Callable[[list[QueuedMessage]], Awaitable[None]] | None = None
+        self._workers = []
+        self._handler = None
         self._running = False
-
-    # ─────────────── API для main.py ───────────────
 
     def set_handler(self, handler):
         self._handler = handler
@@ -48,8 +43,7 @@ class MessageQueue:
     def size(self) -> int:
         return len(self._items)
 
-    def snapshot(self) -> list[dict]:
-        """Сериализуемое представление очереди для UI."""
+    def snapshot(self) -> list:
         now = time.time()
         out = []
         for i, m in enumerate(self._items, 1):
@@ -72,7 +66,6 @@ class MessageQueue:
             return True
 
     async def remove_at(self, index: int) -> bool:
-        """Удалить по индексу (1-based)."""
         async with self._cond:
             if 1 <= index <= len(self._items):
                 self._items.pop(index - 1)
@@ -84,8 +77,6 @@ class MessageQueue:
             n = len(self._items)
             self._items.clear()
             return n
-
-    # ─────────────── Воркеры ───────────────
 
     async def start(self):
         if self._running:
@@ -102,8 +93,20 @@ class MessageQueue:
             w.cancel()
         self._workers.clear()
 
-    async def _pop_batch(self) -> list[QueuedMessage]:
-        """Забирает первое сообщение и все последующие от того же юзера."""
+    async def _wait_for_typing_stop(self, user_id: int):
+        """
+        Если пользователь печатает — ждём. Продлеваем debounce, пока
+        он не остановится. Не больше MAX_TYPING_EXTENSIONS раз.
+        """
+        extensions = 0
+        while extensions < MAX_TYPING_EXTENSIONS:
+            if not typing_tracker.is_typing(user_id, TYPING_EXTENSION_WINDOW):
+                return
+            print(f"   ⌨️  {user_id} печатает, жду ещё {self.debounce_secs}с")
+            await asyncio.sleep(self.debounce_secs)
+            extensions += 1
+
+    async def _pop_batch(self) -> list:
         async with self._cond:
             while self._running and not self._items:
                 await self._cond.wait()
@@ -111,9 +114,12 @@ class MessageQueue:
                 return []
             first = self._items.pop(0)
 
-        # debounce вне лока, чтобы не блокировать put/remove
+        # Базовый debounce
         if self.debounce_secs > 0:
             await asyncio.sleep(self.debounce_secs)
+
+        # Дополнительно ждём, если он печатает следующее
+        await self._wait_for_typing_stop(first.user_id)
 
         batch = [first]
         async with self._cond:

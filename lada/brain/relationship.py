@@ -1,27 +1,10 @@
-# relationship.py — знакомство, близость, статусы и ПРЕДЛОЖЕНИЕ ОТНОШЕНИЙ.
-#
-# Статусы: neutral → acquaintance → lover → husband.
-# Статус ставится автоматически по intimacy ИЛИ вручную.
-#
-# ПРЕДЛОЖЕНИЕ:
-# Когда intimacy достигает порога lover/husband, Лада может САМА предложить
-# отношения. Это регистрируется в data/proposals.json. При отказе:
-#   - intimacy -= PROPOSAL_REJECTION_INTIMACY_PENALTY (0.05)
-#   - кулдаун PROPOSAL_REJECTION_COOLDOWN_DAYS (30)
-#   - она помнит отказ, чувства остаются, но при следующем пороге попробует снова
-# Всё это влияет на её эмоциональное состояние и видно в state_brief.
+# relationship.py — знакомство, близость, статусы, предложения (SQLite)
 
-import json
 import math
 from datetime import datetime, timedelta
-from pathlib import Path
 
+from lada.core.db import get_conn, ensure_user, Transaction
 from lada.core.memory import get_history
-
-FIRST_SEEN_FILE = Path("data") / "first_seen.json"
-STATUS_FILE = Path("data") / "relationships.json"
-PROPOSALS_FILE = Path("data") / "proposals.json"
-FIRST_SEEN_FILE.parent.mkdir(exist_ok=True)
 
 
 PHASE1_DAYS = 30.0
@@ -33,26 +16,11 @@ STATUS_ORDER = ["neutral", "acquaintance", "lover", "husband"]
 SPECIAL_STATUSES = {"lover", "husband"}
 
 
-# ─────────────────────────────────────────────
-# УТИЛИТЫ
-# ─────────────────────────────────────────────
-def _load_json(path: Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
-def _save_json(path: Path, data: dict):
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _parse_iso(ts: str | None) -> datetime | None:
+def _parse_iso(ts):
     if not ts:
         return None
     try:
@@ -61,21 +29,27 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
-# ─────────────────────────────────────────────
-# ЗНАКОМСТВО
-# ─────────────────────────────────────────────
+# ─────────────── ЗНАКОМСТВО ───────────────
+
 def touch_first_seen(user_id: int):
-    data = _load_json(FIRST_SEEN_FILE)
-    key = str(user_id)
-    if key not in data:
-        data[key] = datetime.now().isoformat(timespec="seconds")
-        _save_json(FIRST_SEEN_FILE, data)
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "UPDATE users SET first_seen = COALESCE(first_seen, ?) "
+            "WHERE user_id = ?",
+            (_now(), user_id),
+        )
 
 
 def days_known(user_id: int) -> float:
-    data = _load_json(FIRST_SEEN_FILE)
-    ts = data.get(str(user_id))
-    dt = _parse_iso(ts)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT first_seen FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return 0.0
+    dt = _parse_iso(row["first_seen"])
     if not dt:
         return 0.0
     return (datetime.now() - dt).total_seconds() / 86400.0
@@ -133,13 +107,17 @@ def familiarity_label(user_id: int) -> str:
     return "близкий"
 
 
-# ─────────────────────────────────────────────
-# СТАТУСЫ
-# ─────────────────────────────────────────────
+# ─────────────── СТАТУСЫ ───────────────
+
 def get_status(user_id: int) -> str:
-    data = _load_json(STATUS_FILE)
-    entry = data.get(str(user_id), {})
-    return entry.get("status", "neutral")
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT status FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None or not row["status"]:
+        return "neutral"
+    return row["status"]
 
 
 def get_status_label(user_id: int) -> str:
@@ -155,46 +133,41 @@ def get_status_label(user_id: int) -> str:
 def set_status(user_id: int, status: str, note: str = ""):
     if status not in STATUS_ORDER:
         raise ValueError(f"invalid status: {status}")
-    data = _load_json(STATUS_FILE)
-    key = str(user_id)
-    data[key] = {
-        "status": status,
-        "since": data.get(key, {}).get("since") or datetime.now().isoformat(timespec="seconds"),
-        "updated": datetime.now().isoformat(timespec="seconds"),
-        "note": note or data.get(key, {}).get("note", ""),
-    }
-    _save_json(STATUS_FILE, data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "UPDATE user_state SET status = ?, "
+            "status_since = COALESCE(status_since, ?), "
+            "status_note = ?, updated = ? WHERE user_id = ?",
+            (status, ts, note, ts, user_id),
+        )
 
 
 def update_status_from_intimacy(user_id: int, intimacy: float):
-    """
-    НЕ повышает автоматически. Статус ставится только через принятие
-    предложения (accept_proposal) или вручную. Эта функция оставлена
-    для совместимости и вызывается, но не делает ничего.
-    """
+    """Статус ставится только через accept_proposal или вручную."""
     return
 
 
 def anyone_has_special_status() -> bool:
-    data = _load_json(STATUS_FILE)
-    for entry in data.values():
-        if entry.get("status") in SPECIAL_STATUSES:
-            return True
-    return False
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM user_state "
+        "WHERE status IN ('lover', 'husband')"
+    ).fetchone()
+    return bool(row and row["n"] > 0)
 
 
-def special_holder_user_id() -> int | None:
-    data = _load_json(STATUS_FILE)
-    for uid_str, entry in data.items():
-        if entry.get("status") in SPECIAL_STATUSES:
-            try:
-                return int(uid_str)
-            except ValueError:
-                continue
-    return None
+def special_holder_user_id():
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT user_id FROM user_state "
+        "WHERE status IN ('lover', 'husband') LIMIT 1"
+    ).fetchone()
+    return row["user_id"] if row else None
 
 
-def get_global_cap(user_id: int) -> int | None:
+def get_global_cap(user_id: int):
     from config import GLOBAL_CAP_WHEN_TAKEN
     my_status = get_status(user_id)
     if my_status in SPECIAL_STATUSES:
@@ -204,37 +177,52 @@ def get_global_cap(user_id: int) -> int | None:
     return None
 
 
-# ─────────────────────────────────────────────
-# ПРЕДЛОЖЕНИЕ ОТНОШЕНИЙ
-# ─────────────────────────────────────────────
-def _load_proposals() -> dict:
-    return _load_json(PROPOSALS_FILE)
-
-
-def _save_proposals(data: dict):
-    _save_json(PROPOSALS_FILE, data)
-
+# ─────────────── ПРЕДЛОЖЕНИЯ ───────────────
 
 def get_proposal_state(user_id: int) -> dict:
-    data = _load_proposals()
-    return data.get(str(user_id), {})
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT pending_proposal, pending_since, "
+        "last_lover_proposal, last_husband_proposal, "
+        "last_rejection_which, last_rejection_at, "
+        "accepted, accepted_at "
+        "FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {}
+    out = {}
+    if row["pending_proposal"]:
+        out["pending"] = row["pending_proposal"]
+    if row["pending_since"]:
+        out["pending_since"] = row["pending_since"]
+    if row["last_lover_proposal"]:
+        out["last_lover_proposal"] = row["last_lover_proposal"]
+    if row["last_husband_proposal"]:
+        out["last_husband_proposal"] = row["last_husband_proposal"]
+    if row["last_rejection_which"] and row["last_rejection_at"]:
+        out["last_rejection"] = {
+            "which": row["last_rejection_which"],
+            "at": row["last_rejection_at"],
+        }
+    if row["accepted"]:
+        out["accepted"] = row["accepted"]
+        out["accepted_at"] = row["accepted_at"]
+    return out
 
 
-def get_pending(user_id: int) -> str | None:
-    """Активное предложение от Лады: 'lover' / 'husband' / None."""
-    state = get_proposal_state(user_id)
-    return state.get("pending")
+def get_pending(user_id: int):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT pending_proposal FROM user_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["pending_proposal"]
 
 
-def should_propose(user_id: int) -> str | None:
-    """
-    Пора ли Ладе предложить отношения. Возвращает 'lover' / 'husband' / None.
-    Логика:
-      - intimacy >= 0.90 → husband (если ещё не предлагала)
-      - intimacy >= 0.70 → lover (если ещё не предлагала)
-      - если недавно отказали — ждать кулдаун
-      - если уже есть статус special — не предлагать
-    """
+def should_propose(user_id: int):
     from config import (
         PROPOSAL_ENABLED, STATUS_INTIMACY_LOVER, STATUS_INTIMACY_HUSBAND,
         PROPOSAL_REJECTION_COOLDOWN_DAYS,
@@ -244,18 +232,15 @@ def should_propose(user_id: int) -> str | None:
     if not PROPOSAL_ENABLED:
         return None
 
-    # уже есть статус?
     if get_status(user_id) in SPECIAL_STATUSES:
         return None
 
-    # активное предложение — не повторяем
     if get_pending(user_id):
         return None
 
     state = get_proposal_state(user_id)
     intimacy = image_policy.get_intimacy(user_id)
 
-    # кулдаун после отказа?
     rej = state.get("last_rejection") or {}
     rej_at = _parse_iso(rej.get("at"))
     if rej_at:
@@ -263,21 +248,16 @@ def should_propose(user_id: int) -> str | None:
         if days_since < PROPOSAL_REJECTION_COOLDOWN_DAYS:
             return None
 
-    # husband пробуем только если lover уже был предложен и отклонён/принят,
-    # или если intimacy сразу выше 0.90
     if intimacy >= STATUS_INTIMACY_HUSBAND:
         last_h = _parse_iso(state.get("last_husband_proposal"))
         if not last_h or rej.get("which") != "husband":
-            # предлагаем husband (один раз)
             if state.get("last_husband_proposal") and rej.get("which") != "husband":
                 return None
             return "husband"
 
     if intimacy >= STATUS_INTIMACY_LOVER:
         last_l = _parse_iso(state.get("last_lover_proposal"))
-        # если lover уже отклоняли — не предлагаем пока кулдаун, он выше
         if not last_l or rej.get("which") == "lover":
-            # если отказ был по lover и кулдаун прошёл — можно попробовать снова
             if last_l and rej.get("which") == "lover":
                 return "lover"
             if not last_l:
@@ -287,45 +267,44 @@ def should_propose(user_id: int) -> str | None:
 
 
 def record_proposal(user_id: int, which: str):
-    """Регистрирует, что Лада сделала предложение."""
-    data = _load_proposals()
-    key = str(user_id)
-    entry = data.get(key, {})
-    entry["pending"] = which
-    entry["pending_since"] = datetime.now().isoformat(timespec="seconds")
-    if which == "lover":
-        entry["last_lover_proposal"] = datetime.now().isoformat(timespec="seconds")
-    elif which == "husband":
-        entry["last_husband_proposal"] = datetime.now().isoformat(timespec="seconds")
-    data[key] = entry
-    _save_proposals(data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        if which == "lover":
+            conn.execute(
+                "UPDATE user_state SET pending_proposal = ?, "
+                "pending_since = ?, last_lover_proposal = ?, "
+                "updated = ? WHERE user_id = ?",
+                (which, ts, ts, ts, user_id),
+            )
+        elif which == "husband":
+            conn.execute(
+                "UPDATE user_state SET pending_proposal = ?, "
+                "pending_since = ?, last_husband_proposal = ?, "
+                "updated = ? WHERE user_id = ?",
+                (which, ts, ts, ts, user_id),
+            )
 
 
-def accept_proposal(user_id: int) -> str | None:
-    """Пользователь согласился. Ставим статус, убираем pending."""
+def accept_proposal(user_id: int):
     which = get_pending(user_id)
     if not which:
         return None
 
-    data = _load_proposals()
-    key = str(user_id)
-    entry = data.get(key, {})
-    entry.pop("pending", None)
-    entry.pop("pending_since", None)
-    entry["accepted"] = which
-    entry["accepted_at"] = datetime.now().isoformat(timespec="seconds")
-    data[key] = entry
-    _save_proposals(data)
-
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "UPDATE user_state SET pending_proposal = NULL, "
+            "pending_since = NULL, accepted = ?, accepted_at = ?, "
+            "updated = ? WHERE user_id = ?",
+            (which, ts, ts, user_id),
+        )
     set_status(user_id, which, note=f"принято предложение {which}")
     return which
 
 
-def reject_proposal(user_id: int) -> str | None:
-    """
-    Пользователь отказал. Штраф к intimacy, sadness, кулдаун.
-    Возвращает 'lover' / 'husband' — что было отвергнуто.
-    """
+def reject_proposal(user_id: int):
     from config import (
         PROPOSAL_REJECTION_INTIMACY_PENALTY,
         PROPOSAL_REJECTION_SADNESS_DELTA,
@@ -336,24 +315,20 @@ def reject_proposal(user_id: int) -> str | None:
     if not which:
         return None
 
-    data = _load_proposals()
-    key = str(user_id)
-    entry = data.get(key, {})
-    entry.pop("pending", None)
-    entry.pop("pending_since", None)
-    entry["last_rejection"] = {
-        "which": which,
-        "at": datetime.now().isoformat(timespec="seconds"),
-    }
-    data[key] = entry
-    _save_proposals(data)
+    ts = _now()
+    with Transaction() as conn:
+        ensure_user(user_id)
+        conn.execute(
+            "UPDATE user_state SET pending_proposal = NULL, "
+            "pending_since = NULL, last_rejection_which = ?, "
+            "last_rejection_at = ?, updated = ? WHERE user_id = ?",
+            (which, ts, ts, user_id),
+        )
 
-    # штраф к intimacy
     current = image_policy.get_intimacy(user_id)
     new_intimacy = max(0.0, current - PROPOSAL_REJECTION_INTIMACY_PENALTY)
     image_policy.set_trust(user_id, intimacy=new_intimacy)
 
-    # штраф к шкалам — уныние вверх, усердие вниз
     try:
         sins.apply_deltas({
             "уныние": PROPOSAL_REJECTION_SADNESS_DELTA / 2,
@@ -365,10 +340,7 @@ def reject_proposal(user_id: int) -> str | None:
     return which
 
 
-def rejection_context(user_id: int) -> str | None:
-    """
-    Текстовый контекст о недавнем отказе для state_brief.
-    """
+def rejection_context(user_id: int):
     from config import PROPOSAL_REJECTION_COOLDOWN_DAYS
     state = get_proposal_state(user_id)
     rej = state.get("last_rejection") or {}
@@ -395,16 +367,14 @@ def rejection_context(user_id: int) -> str | None:
     )
 
 
-# ─────────────────────────────────────────────
-# КОНТЕКСТ ДЛЯ ПРОМПТА
-# ─────────────────────────────────────────────
-def emotion_impact_note(user_id: int, mood: str) -> str:
+# ─────────────── КОНТЕКСТ ───────────────
+
+def emotion_impact_note(user_id: int, mood_str: str) -> str:
     label = familiarity_label(user_id)
     status = get_status(user_id)
     status_label = get_status_label(user_id)
 
     parts = []
-
     if label == "незнакомец":
         parts.append("Этот человек тебе незнаком. Держи дистанцию: коротко, вежливо.")
     elif label == "новый знакомый":

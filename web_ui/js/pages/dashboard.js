@@ -6,7 +6,8 @@ registerPage('dashboard', {
             <div class="actions">
                 <button class="btn primary" onclick="doThink()">💭 Мысль</button>
                 <button class="btn" onclick="doReflect()">🪞 Рефлексия</button>
-                <button class="btn" onclick="doSleep()">💤 Сон</button>
+                <button class="btn" onclick="doSleep(false)">💤 Сон</button>
+                <button class="btn" onclick="doSleep(true)">💤 Сон (форс)</button>
                 <button class="btn" onclick="toggleMode()">⚙️ Режим</button>
             </div>
         `;
@@ -39,9 +40,14 @@ async function doReflect() {
     try { await api('/api/reflect', { method: 'POST' }); alert('🪞 Рефлексия записана'); }
     catch (e) { alert('Ошибка: ' + e.message); }
 }
-async function doSleep() {
-    try { const r = await api('/api/sleep', { method: 'POST' }); alert('💤 ' + r.result); }
-    catch (e) { alert('Ошибка: ' + e.message); }
+async function doSleep(force) {
+    try {
+        const r = await api('/api/sleep', {
+            method: 'POST',
+            body: JSON.stringify({ force: !!force })
+        });
+        alert('💤 ' + r.result);
+    } catch (e) { alert('Ошибка: ' + e.message); }
 }
 async function toggleMode() {
     try {
