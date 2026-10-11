@@ -1,15 +1,12 @@
 # web.py — веб-интерфейс управления Ладой
 
 import asyncio
-import os
-import secrets
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from config import MODEL, OWNER_ID
@@ -28,44 +25,20 @@ from lada.brain import sins, mood
 from lada.brain import image_policy
 from lada.app.client import message_queue
 
+from web_ui.persona_api import router as persona_router
+from web_ui.auth import router as auth_router, require_auth
+from web_ui.ssh_terminal import router as ssh_terminal_router
+
 
 app = FastAPI(title="Lada")
+app.include_router(auth_router)
+app.include_router(persona_router)
+app.include_router(ssh_terminal_router)
 
 WEB_CHAT_USER_ID = 999999999
 VIEW_USER_ID = OWNER_ID
 WEB_UI_DIR = Path("web_ui")
 IMAGES_DIR = Path("data/generated_images")
-
-# ─────────────── Basic Auth ───────────────
-WEB_AUTH_USER = os.environ.get("WEB_AUTH_USER", "")
-WEB_AUTH_PASS = os.environ.get("WEB_AUTH_PASS", "")
-
-_security = HTTPBasic(auto_error=False)
-
-
-def _auth_required() -> bool:
-    return bool(WEB_AUTH_USER and WEB_AUTH_PASS)
-
-
-async def require_auth(credentials: HTTPBasicCredentials | None = Depends(_security)):
-    if not _auth_required():
-        return True
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Требуется авторизация",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    user_ok = secrets.compare_digest(credentials.username, WEB_AUTH_USER)
-    pass_ok = secrets.compare_digest(credentials.password, WEB_AUTH_PASS)
-    if not (user_ok and pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return True
-
 
 if WEB_UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(WEB_UI_DIR)), name="ui")
@@ -102,7 +75,7 @@ class SleepRequest(BaseModel):
 # ─────────────── UI ───────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def index(_: bool = Depends(require_auth)):
+async def index():
     f = WEB_UI_DIR / "index.html"
     if f.exists():
         return f.read_text(encoding="utf-8")
@@ -159,7 +132,6 @@ async def reflections(_: bool = Depends(require_auth)):
 
 @app.get("/api/observations")
 async def observations(_: bool = Depends(require_auth)):
-    """Свежие наблюдения о владельце (последние 50)."""
     items = [
         m for m in faiss_mem.metadata
         if m.get("category") == "observation" and m.get("user_id") == VIEW_USER_ID
@@ -440,7 +412,6 @@ async def dialog_get(user_id: int, limit: int = 200,
 
 @app.post("/api/dialogs/{user_id}/clear")
 async def dialog_clear(user_id: int, _: bool = Depends(require_auth)):
-    # SQLite: удаляем из таблицы messages
     clear_history(user_id)
     return {"ok": True}
 
@@ -481,14 +452,14 @@ async def chat_history(_: bool = Depends(require_auth)):
 
 @app.post("/api/chat/clear")
 async def chat_clear(_: bool = Depends(require_auth)):
-    # SQLite: удаляем из таблицы messages
     clear_history(WEB_CHAT_USER_ID)
     return {"ok": True}
+
+
 # ─────────────── Генерированные фото ───────────────
 
 @app.get("/api/images")
 async def list_images(_: bool = Depends(require_auth)):
-    """Список сгенерированных фото (последние 60, свежие сначала)."""
     if not IMAGES_DIR.exists():
         return []
 
@@ -525,8 +496,6 @@ async def list_images(_: bool = Depends(require_auth)):
 
 @app.get("/api/images/{filename}")
 async def get_image(filename: str, _: bool = Depends(require_auth)):
-    """Отдаёт сам файл картинки."""
-    # Защита от path traversal: оставляем только имя файла
     safe_name = Path(filename).name
     if not safe_name.endswith(".png"):
         raise HTTPException(400, "Только .png")
@@ -540,7 +509,6 @@ async def get_image(filename: str, _: bool = Depends(require_auth)):
 
 @app.delete("/api/images/{filename}")
 async def delete_image(filename: str, _: bool = Depends(require_auth)):
-    """Удаляет файл картинки."""
     safe_name = Path(filename).name
     if not safe_name.endswith(".png"):
         raise HTTPException(400, "Только .png")

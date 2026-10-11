@@ -1,11 +1,16 @@
-# run.py — супервизор: следит за файлами и перезапускает main.py при падении
+# run.py — единый супервизор: .env → ollama serve → Stable Diffusion → main.py
+# + watchdog: правки .py перезапускают только main.py.
 
+import argparse
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +21,7 @@ from watchdog.events import FileSystemEventHandler
 PROJECT_ROOT = Path(__file__).parent.resolve()
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+PID_FILE = PROJECT_ROOT / "data" / "run.pid"
 LOG_RETENTION_DAYS = 14
 
 IGNORED_FILES = {"run.py"}
@@ -28,7 +34,25 @@ IGNORED_DIRS = {
 
 RESTART_DELAYS = [2, 4, 8, 16, 30]
 STABLE_THRESHOLD = 60
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/tags"
 
+
+# ------------------------------- .env ------------------------------------
+
+def load_dotenv(path: Path = PROJECT_ROOT / ".env"):
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+# ----------------------------- логирование -------------------------------
 
 def _today_log() -> Path:
     return LOG_DIR / f"main_{datetime.now().strftime('%Y%m%d')}.log"
@@ -44,65 +68,214 @@ def _clean_old_logs():
         print(f"⚠️ Не удалось почистить логи: {e}")
 
 
-def _log_line(text: str):
-    try:
-        print(text, flush=True)
-    except UnicodeEncodeError:
+_log_lock = threading.Lock()
+
+
+def log(text: str):
+    with _log_lock:
         try:
-            sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
-            sys.stdout.flush()
+            print(text, flush=True)
+        except UnicodeEncodeError:
+            try:
+                sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+                sys.stdout.flush()
+            except Exception:
+                pass
+        try:
+            with open(_today_log(), "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
         except Exception:
             pass
-    try:
-        with open(_today_log(), "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
-    except Exception:
-        pass
 
 
-def _child_env() -> dict:
-    """Окружение для main.py: UTF-8 + без буферизации."""
+def _child_env(extra: dict | None = None) -> dict:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
-    env["PYTHONUNBUFFERED"] = "1"  # важно: main.py печатает сразу
+    env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
+    if extra:
+        env.update(extra)
     return env
 
 
-class Reloader(FileSystemEventHandler):
-    def __init__(self):
+def _quick_health(url: str, timeout: float = 1.5) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status < 500
+    except Exception:
+        return False
+
+
+def _wrap_cmd_for_windows(cmd: list[str]) -> list[str]:
+    if os.name != "nt" or not cmd:
+        return cmd
+    first = cmd[0].lower()
+    if first.endswith((".bat", ".cmd")):
+        return ["cmd", "/c"] + cmd
+    return cmd
+
+
+def _find_git(sd_cwd: Path | None = None) -> str | None:
+    """Ищет git.exe в стандартных местах, в папке SD и в PATH.
+    Не скачивает ничего, только находит уже установленный."""
+    candidates: list[Path] = []
+
+    # 1) Внутри папки SD (портативные сборки часто кладут git сюда)
+    if sd_cwd:
+        candidates += [
+            sd_cwd / "git" / "cmd" / "git.exe",
+            sd_cwd / "git" / "bin" / "git.exe",
+            sd_cwd / "PortableGit" / "cmd" / "git.exe",
+            sd_cwd / "PortableGit" / "bin" / "git.exe",
+        ]
+
+    # 2) Системные места Windows
+    for p in (
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files (x86)\Git\bin\git.exe",
+    ):
+        candidates.append(Path(p))
+
+    # 3) PATH (то, что видит обычная консоль)
+    which = shutil.which("git")
+    if which:
+        candidates.append(Path(which))
+
+    for c in candidates:
+        try:
+            if c.exists() and c.is_file():
+                return str(c)
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------- базовый сервис -----------------------------
+
+class Service:
+    def __init__(
+        self,
+        name: str,
+        command: list[str],
+        cwd: Path = PROJECT_ROOT,
+        env: dict | None = None,
+        health_url: str | None = None,
+        startup_grace: float = 3.0,
+        health_timeout: float = 120.0,
+        optional: bool = False,
+    ):
+        self.name = name
+        self.command = command
+        self.cwd = cwd
+        self.env = env
+        self.health_url = health_url
+        self.startup_grace = startup_grace
+        self.health_timeout = health_timeout
+        self.optional = optional
+
         self.process: subprocess.Popen | None = None
         self.started_at: float = 0
         self.fail_count = 0
         self._stop = False
-        self._reader_thread: threading.Thread | None = None
-        self.start_process()
+        self._lock = threading.Lock()
 
-    def start_process(self):
-        if self.process and self.process.poll() is None:
-            _log_line("🛑 Останавливаю main.py...")
-            self._terminate_process()
+    def start(self):
+        with self._lock:
+            if self._stop:
+                return
+            if self.process and self.process.poll() is None:
+                return
 
-        _log_line("▶️  Запускаю main.py...")
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            cmd = _wrap_cmd_for_windows(self.command)
+            log(f"[{self.name}] ▶️  {' '.join(cmd)}")
 
-        self.process = subprocess.Popen(
-            [sys.executable, "-X", "utf8", "-u", "main.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=str(PROJECT_ROOT),
-            bufsize=1,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=_child_env(),
-            creationflags=creationflags,
-        )
-        self.started_at = time.time()
-        self._start_reader(self.process)
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            try:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.cwd),
+                    bufsize=1,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=self.env or os.environ.copy(),
+                    creationflags=creationflags,
+                )
+            except FileNotFoundError as e:
+                if self.optional:
+                    log(f"[{self.name}] ⚠️ не найден ({e}) — пропускаю. "
+                        f"Пропиши полный путь в .env")
+                    self._stop = True
+                    return
+                raise
+            self.started_at = time.time()
+            self._start_reader(self.process)
+
+    def restart(self):
+        log(f"[{self.name}] 🔄 Перезапуск по запросу")
+        self._terminate()
+        self.fail_count = 0
+        self.start()
+
+    def stop(self, graceful_timeout: float = 8.0):
+        self._stop = True
+        self._terminate(timeout=graceful_timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self.process and self.process.poll() is None)
+
+    def wait_healthy(self) -> bool:
+        if not self.health_url:
+            time.sleep(self.startup_grace)
+            return True
+        deadline = time.time() + self.health_timeout
+        last_report = 0.0
+        start = time.time()
+        while time.time() < deadline:
+            if self._stop:
+                return False
+            if not self.is_alive():
+                return False
+            if _quick_health(self.health_url):
+                return True
+            elapsed = time.time() - start
+            if elapsed - last_report >= 10:
+                log(f"[{self.name}] ещё жду... ({elapsed:.0f}с)")
+                last_report = elapsed
+            time.sleep(1.5)
+        return False
+
+    def check_and_restart(self):
+        if self._stop or not self.process:
+            return
+        retcode = self.process.poll()
+        if retcode is None:
+            return
+
+        work_time = time.time() - self.started_at
+        log(f"[{self.name}] 💥 упал (код {retcode}), проработал {work_time:.0f}с")
+
+        if work_time > STABLE_THRESHOLD:
+            self.fail_count = 0
+
+        delay = RESTART_DELAYS[min(self.fail_count, len(RESTART_DELAYS) - 1)]
+        self.fail_count += 1
+        log(f"[{self.name}] ⏳ перезапуск через {delay}с...")
+
+        def _delayed():
+            time.sleep(delay)
+            if not self._stop:
+                self.start()
+
+        threading.Thread(target=_delayed, daemon=True).start()
 
     def _start_reader(self, process: subprocess.Popen):
         def reader():
@@ -110,7 +283,7 @@ class Reloader(FileSystemEventHandler):
                 for line in iter(process.stdout.readline, ""):
                     if not line:
                         break
-                    _log_line(line.rstrip())
+                    log(f"[{self.name}] {line.rstrip()}")
             except Exception:
                 pass
             try:
@@ -118,26 +291,41 @@ class Reloader(FileSystemEventHandler):
             except Exception:
                 pass
 
-        self._reader_thread = threading.Thread(target=reader, daemon=True)
-        self._reader_thread.start()
+        threading.Thread(target=reader, daemon=True).start()
 
-    def _terminate_process(self):
-        if not self.process:
+    def _terminate(self, timeout: float = 5.0):
+        proc = self.process
+        if not proc or proc.poll() is not None:
             return
         try:
             if os.name == "nt":
-                self.process.send_signal(signal.CTRL_BREAK_EVENT)
+                try:
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                except Exception:
+                    proc.terminate()
             else:
-                self.process.terminate()
+                proc.terminate()
             try:
-                self.process.wait(timeout=5)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                log(f"[{self.name}] ⚠️ не завершился мягко, kill")
+                proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
         except Exception:
             try:
-                self.process.kill()
+                proc.kill()
             except Exception:
                 pass
+
+
+# ---------------------------- файловый watcher ---------------------------
+
+class FileWatcher(FileSystemEventHandler):
+    def __init__(self, service: Service):
+        self.service = service
 
     def on_modified(self, event):
         if event.is_directory:
@@ -149,37 +337,93 @@ class Reloader(FileSystemEventHandler):
             return
         if not path.name.endswith(".py"):
             return
-        _log_line(f"🔄 Изменён {path.name}")
-        self.fail_count = 0
-        self.start_process()
-
-    def check_and_restart(self):
-        if self._stop or not self.process:
-            return
-        retcode = self.process.poll()
-        if retcode is None:
-            return
-
-        work_time = time.time() - self.started_at
-        _log_line(f"💥 main.py упал (код {retcode}), проработал {work_time:.0f}с")
-
-        if work_time > STABLE_THRESHOLD:
-            self.fail_count = 0
-
-        delay = RESTART_DELAYS[min(self.fail_count, len(RESTART_DELAYS) - 1)]
-        self.fail_count += 1
-        _log_line(f"⏳ Перезапуск через {delay}с...")
-
-        time.sleep(delay)
-        if not self._stop:
-            self.start_process()
-
-    def stop(self):
-        self._stop = True
-        self._terminate_process()
+        log(f"🔄 Изменён {path.name}")
+        self.service.restart()
 
 
-if __name__ == "__main__":
+# ------------------------------- сборка ----------------------------------
+
+def build_services(args) -> tuple[list[Service], Service | None]:
+    deps: list[Service] = []
+
+    # --- Ollama ---
+    if not args.no_ollama:
+        ollama_url = os.getenv("LADA_OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        ollama_cmd = os.getenv("LADA_OLLAMA_CMD", "ollama serve")
+        if _quick_health(ollama_url):
+            log("✅ Ollama уже запущен — не трогаю.")
+        else:
+            deps.append(Service(
+                name="ollama",
+                command=shlex.split(ollama_cmd, posix=(os.name != "nt")),
+                health_url=ollama_url,
+                startup_grace=3,
+                health_timeout=60,
+                optional=True,
+            ))
+
+    # --- Stable Diffusion ---
+    if not args.no_sd:
+        sd_cmd_str = os.getenv("LADA_SD_CMD", "").strip()
+        if not sd_cmd_str:
+            log("ℹ️  LADA_SD_CMD не задан — SD пропускаю.")
+        else:
+            sd_cwd = Path(os.getenv("LADA_SD_CWD", str(PROJECT_ROOT))).resolve()
+            sd_url = os.getenv("LADA_SD_URL", "").strip() or None
+            sd_timeout = float(os.getenv("LADA_SD_HEALTH_TIMEOUT", "300"))
+
+            parts = shlex.split(sd_cmd_str, posix=False)
+            first = parts[0].strip('"')
+            if not Path(first).is_absolute():
+                candidate = sd_cwd / first
+                if candidate.exists():
+                    parts[0] = str(candidate)
+
+            # Ищем git только внутри папки SD и в системе
+            sd_env = _child_env()
+            git_path = _find_git(sd_cwd)
+            if git_path:
+                sd_env["GIT"] = git_path
+                git_dir = str(Path(git_path).parent)
+                current_path = sd_env.get("PATH", "")
+                sd_env["PATH"] = git_dir + os.pathsep + current_path
+                log(f"[sd] git найден: {git_path}")
+            else:
+                log("[sd] ⚠️ git не найден — A1111 может упасть на fetch assets")
+
+            deps.append(Service(
+                name="sd",
+                command=parts,
+                cwd=sd_cwd,
+                env=sd_env,
+                health_url=sd_url,
+                startup_grace=5,
+                health_timeout=sd_timeout,
+                optional=True,
+            ))
+
+    # --- main.py ---
+    main_service = Service(
+        name="main",
+        command=[sys.executable, "-X", "utf8", "-u", "main.py"],
+        env=_child_env(),
+    )
+
+    return deps, main_service
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Lada supervisor")
+    p.add_argument("--no-ollama", action="store_true")
+    p.add_argument("--no-sd", action="store_true")
+    p.add_argument("--no-watch", action="store_true")
+    p.add_argument("--only", choices=["main", "ollama", "sd"])
+    return p.parse_args()
+
+
+# ------------------------------- main ------------------------------------
+
+def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -187,20 +431,69 @@ if __name__ == "__main__":
         pass
 
     _clean_old_logs()
-    handler = Reloader()
-    observer = Observer()
-    observer.schedule(handler, str(PROJECT_ROOT), recursive=True)
-    observer.start()
-    _log_line("👀 Слежу за main.py (Ctrl+C для выхода)")
-    _log_line(f"📁 Логи: {LOG_DIR}")
+    load_dotenv()
+    args = parse_args()
+
+    if args.only == "main":
+        args.no_ollama = True
+        args.no_sd = True
+    elif args.only == "ollama":
+        args.no_sd = True
+    elif args.only == "sd":
+        args.no_ollama = True
+
+    deps, main_service = build_services(args)
+    all_services: list[Service] = list(deps)
+
+    run_main = args.only in (None, "main")
+    if run_main:
+        all_services.append(main_service)
+
+    for s in deps:
+        s.start()
+
+    for s in deps:
+        ok = s.wait_healthy()
+        log(f"[{s.name}] {'✅ готов' if ok else '⚠️ не отвечает, продолжаю'}")
+
+    if run_main:
+        main_service.start()
+
+    observer = None
+    if not args.no_watch and run_main:
+        observer = Observer()
+        observer.schedule(FileWatcher(main_service), str(PROJECT_ROOT), recursive=True)
+        observer.start()
+
+    try:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+    log("👀 Супервизор запущен (Ctrl+C для выхода)")
+    log(f"📁 Логи: {LOG_DIR}")
+    log(f"🆔 PID: {os.getpid()}")
 
     try:
         while True:
             time.sleep(1)
-            handler.check_and_restart()
+            for s in all_services:
+                s.check_and_restart()
     except KeyboardInterrupt:
-        _log_line("🛑 Выход...")
+        log("🛑 Выход...")
     finally:
-        observer.stop()
-        handler.stop()
-    observer.join()
+        if observer:
+            observer.stop()
+        for s in reversed(all_services):
+            s.stop()
+        if observer:
+            observer.join()
+        try:
+            PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+{
+  "hosts": [
+    {
+      "id": "local",
+      "name": "Мой ПК",
+      "host": "127.0.0.1",
+      "port": 22,
+      "user": "scvol",
+      "key_path": "C:/Users/scvol/.ssh/id_ed25519",
+      "password": "",
+      "commands": [
+        { "name": "cd в проект", "cmd": "cd C:\\Users\\scvol\\Desktop\\ladaclient" },
+        { "name": "git status", "cmd": "git status" },
+        { "name": "pytest", "cmd": "venv\\Scripts\\pytest -q" },
+        { "name": "tasklist python", "cmd": "tasklist | findstr python" }
+      ]
+    }
+  ]
+}

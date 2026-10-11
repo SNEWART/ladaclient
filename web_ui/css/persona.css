@@ -1,0 +1,124 @@
+.persona-layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 16px;
+    height: calc(100vh - 130px);
+    min-height: 500px;
+}
+
+.persona-files {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.persona-files-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 10px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+#persona-files-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.persona-file {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: 0.15s;
+}
+.persona-file:hover {
+    border-color: var(--accent);
+    background: rgba(167,139,250,0.05);
+}
+.persona-file.active {
+    border-color: var(--accent);
+    background: rgba(167,139,250,0.15);
+}
+.persona-file-name {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 14px;
+    word-break: break-all;
+}
+.persona-file-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+}
+
+.persona-editor {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.persona-editor-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+.persona-meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: 10px;
+}
+.persona-editor-actions {
+    display: flex;
+    gap: 8px;
+}
+
+#persona-textarea {
+    flex: 1;
+    width: 100%;
+    min-height: 300px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    color: var(--text);
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    resize: none;
+    outline: none;
+}
+#persona-textarea:focus {
+    border-color: var(--accent);
+}
+
+@media (max-width: 768px) {
+    .persona-layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+        height: auto;
+    }
+    .persona-files { max-height: 200px; }
+    #persona-textarea { font-size: 16px; min-height: 400px; }
+}

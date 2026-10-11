@@ -1,0 +1,84 @@
+.ssh-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.ssh-hosts {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.ssh-host-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 16px;
+    border-radius: 40px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+    transition: 0.15s;
+    min-height: 38px;
+}
+.ssh-host-btn:hover { border-color: var(--accent); }
+.ssh-host-btn.active {
+    background: rgba(167,139,250,0.2);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.ssh-status {
+    color: var(--muted);
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: 6px;
+}
+.ssh-status.ok { color: #4ade80; }
+.ssh-status.err { color: var(--danger); }
+
+.ssh-quick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.ssh-quick:empty { display: none; }
+
+.ssh-cmd-btn {
+    font-size: 13px;
+    padding: 6px 12px;
+    min-height: 32px;
+}
+
+.ssh-term-wrap {
+    background: #0a0a14;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px;
+    height: calc(100vh - 260px);
+    min-height: 400px;
+    overflow: hidden;
+}
+
+#ssh-term {
+    width: 100%;
+    height: 100%;
+}
+
+.xterm .xterm-viewport {
+    background: transparent !important;
+}
+
+@media (max-width: 768px) {
+    .ssh-term-wrap {
+        height: calc(100vh - 220px);
+        min-height: 300px;
+    }
+}

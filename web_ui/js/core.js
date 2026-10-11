@@ -1,4 +1,4 @@
-// core.js — роутер с hash-навигацией
+// core.js — роутер, CSRF, авторизация
 
 const pages = {};
 
@@ -6,11 +6,29 @@ function registerPage(name, def) {
     pages[name] = def;
 }
 
+function getCookie(name) {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+}
+
+function getCsrfToken() {
+    return getCookie('lada_csrf');
+}
+
+let _authEnabled = false;
+
 async function api(url, opts = {}) {
-    const r = await fetch(url, {
-        headers: { 'Content-Type': 'application/json' },
-        ...opts,
-    });
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (method !== 'GET' && method !== 'HEAD') {
+        const csrf = getCsrfToken();
+        if (csrf) headers['X-CSRF-Token'] = csrf;
+    }
+    const r = await fetch(url, { ...opts, headers, credentials: 'same-origin' });
+    if (r.status === 401) {
+        renderLogin();
+        throw new Error('unauthorized');
+    }
     if (!r.ok) throw new Error(await r.text());
     return r.json();
 }
@@ -38,8 +56,7 @@ function closeSidebar() {
 
 const MAIN_TABS = new Set([
     'dashboard', 'soul', 'thoughts', 'reflections',
-    'images',
-    'queue', 'users', 'chat',
+    'images', 'queue', 'users', 'persona', 'chat',
 ]);
 
 
@@ -102,6 +119,7 @@ async function updateQueueBadge() {
     try {
         const q = await api('/api/queue');
         const badge = document.getElementById('queue-badge');
+        if (!badge) return;
         if (q.size > 0) {
             badge.textContent = q.size;
             badge.style.display = 'inline-block';
@@ -114,19 +132,59 @@ async function updateQueueBadge() {
 async function refreshHeaderStatus() {
     try {
         const s = await api('/api/status');
+        const el = document.getElementById('header-status');
+        if (!el) return;
         const isMobile = window.innerWidth <= 768;
-        const text = isMobile
+        el.textContent = isMobile
             ? `${s.mode} · ${s.time}`
             : `${s.model} · ${s.mode} · ${s.time}`;
-        document.getElementById('header-status').textContent = text;
     } catch (e) {}
 }
 
 
-// ─────────────── ИНИЦИАЛИЗАЦИЯ ───────────────
+// ─────────────── LOGOUT ───────────────
 
-function initApp() {
+async function doLogout() {
+    try {
+        await api('/api/auth/logout', { method: 'POST' });
+    } catch (e) {}
+    location.reload();
+}
+
+
+// ─────────────── INIT ───────────────
+
+async function initApp() {
+    // 1. Проверяем сессию
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'same-origin' });
+        if (r.status === 401) {
+            renderLogin();
+            return;
+        }
+        const me = await r.json();
+        _authEnabled = !!me.auth_enabled;
+    } catch (e) {
+        // сеть упала — пробуем дальше
+    }
+
+    // 2. Кнопка logout в сайдбаре, если авторизация включена
+    if (_authEnabled) {
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar && !document.getElementById('logout-btn')) {
+            const btn = document.createElement('button');
+            btn.className = 'nav-btn';
+            btn.id = 'logout-btn';
+            btn.textContent = '🚪 Выйти';
+            btn.style.marginTop = 'auto';
+            btn.onclick = doLogout;
+            sidebar.appendChild(btn);
+        }
+    }
+
+    // 3. Обычная инициализация
     document.querySelectorAll('.nav-btn').forEach(btn => {
+        if (btn.id === 'logout-btn') return;
         btn.addEventListener('click', () => switchPage(btn.dataset.tab));
     });
 
@@ -146,7 +204,7 @@ function initApp() {
 
     window.addEventListener('resize', refreshHeaderStatus);
 
-    window.addEventListener('popstate', (e) => {
+    window.addEventListener('popstate', () => {
         const { page, arg } = parseHash();
         const p = {};
         if (page === 'user_profile' && arg) {

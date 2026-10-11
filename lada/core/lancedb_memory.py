@@ -1,9 +1,11 @@
-# lancedb_memory.py — векторная память на LanceDB (замена FAISS)
+# lancedb_memory.py — векторная память на LanceDB.
 #
-# Полностью сохраняет интерфейс faiss_memory, включая property `metadata`.
-# Без pandas — работаем через pyarrow напрямую.
+# Обогащение: каждая запись может нести meta-словарь (valence, mood_at_time,
+# trust_at_time, intimacy_at_time, top_sins). Храним как JSON-строку в поле
+# meta_json. Для старых таблиц колонка добавляется автоматически при загрузке.
 
 import hashlib
+import json
 import time
 from collections import OrderedDict
 from datetime import datetime
@@ -43,10 +45,25 @@ class LanceMemory:
             self.table = self.db.open_table(TABLE_NAME)
             print(f"   🗄 LanceDB: таблица '{TABLE_NAME}' открыта "
                   f"({self.table.count_rows()} записей)")
+            self._ensure_meta_column()
         except Exception:
             print(f"   🗄 LanceDB: таблица '{TABLE_NAME}' не найдена, "
                   f"будет создана при первой записи")
             self.table = None
+
+    def _ensure_meta_column(self):
+        """Добавляет meta_json, если её нет в старой таблице."""
+        if self.table is None:
+            return
+        try:
+            names = list(self.table.schema.names)
+            if "meta_json" in names:
+                return
+            self.table.add_columns({"meta_json": "cast('' as string)"})
+            print("   🗄 LanceDB: добавлено поле meta_json для старых записей")
+        except Exception as e:
+            print(f"   ⚠️ LanceDB: не удалось добавить meta_json ({e}) — "
+                  f"эмоциональные метки сохраняться не будут")
 
     def _ensure_table(self, sample_vector: list):
         if self.table is not None:
@@ -60,14 +77,14 @@ class LanceMemory:
             pa.field("source", pa.string()),
             pa.field("user_id", pa.int64()),
             pa.field("timestamp", pa.string()),
+            pa.field("meta_json", pa.string()),
         ])
         self.table = self.db.create_table(TABLE_NAME, schema=schema)
 
     def save(self):
-        """LanceDB сохраняет автоматически."""
         pass
 
-    # ─────────────── METADATA (совместимость с FAISS) ───────────────
+    # ─────────────── METADATA ───────────────
 
     @property
     def metadata(self) -> list:
@@ -92,12 +109,23 @@ class LanceMemory:
             return []
 
         n = len(cols.get("text", []))
+        has_meta = "meta_json" in cols
         out = []
         for i in range(n):
             uid = cols["user_id"][i] if "user_id" in cols else None
             if uid is not None and int(uid) == -1:
                 uid = None
-            out.append({
+
+            meta = {}
+            if has_meta:
+                raw = cols["meta_json"][i]
+                if raw:
+                    try:
+                        meta = json.loads(raw)
+                    except Exception:
+                        meta = {}
+
+            item = {
                 "text": cols["text"][i] or "",
                 "category": (cols["category"][i]
                              if "category" in cols else "general"),
@@ -106,7 +134,16 @@ class LanceMemory:
                 "user_id": uid,
                 "timestamp": (cols["timestamp"][i]
                               if "timestamp" in cols else ""),
-            })
+            }
+            # Распаковываем meta на верхний уровень — удобно для search-фильтров
+            if meta:
+                item["_meta"] = meta
+                item["valence"] = meta.get("valence")
+                item["mood_at_time"] = meta.get("mood_at_time")
+                item["trust_at_time"] = meta.get("trust_at_time")
+                item["intimacy_at_time"] = meta.get("intimacy_at_time")
+                item["top_sins"] = meta.get("top_sins")
+            out.append(item)
 
         self._meta_cache = out
         self._meta_cache_time = now
@@ -182,7 +219,8 @@ class LanceMemory:
     # ─────────────── ЗАПИСЬ ───────────────
 
     def add(self, text: str, category: str = "general",
-            source: str = "reflection", user_id: int = None) -> bool:
+            source: str = "reflection", user_id: int = None,
+            meta: dict | None = None) -> bool:
         if not text.strip():
             return False
         vec = self._embed(text)
@@ -191,6 +229,13 @@ class LanceMemory:
         self._ensure_table(vec.tolist())
 
         uid = user_id if user_id is not None else -1
+        meta_str = ""
+        if meta:
+            try:
+                meta_str = json.dumps(meta, ensure_ascii=False)
+            except Exception:
+                meta_str = ""
+
         record = {
             "vector": vec.tolist(),
             "text": text,
@@ -198,6 +243,7 @@ class LanceMemory:
             "source": source,
             "user_id": uid,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "meta_json": meta_str,
         }
         self.table.add([record])
         self._invalidate_meta_cache()
@@ -214,6 +260,13 @@ class LanceMemory:
                 continue
             self._ensure_table(vec.tolist())
             uid = item.get("user_id")
+            meta = item.get("meta")
+            meta_str = ""
+            if meta:
+                try:
+                    meta_str = json.dumps(meta, ensure_ascii=False)
+                except Exception:
+                    meta_str = ""
             records.append({
                 "vector": vec.tolist(),
                 "text": item["text"],
@@ -222,6 +275,7 @@ class LanceMemory:
                 "user_id": uid if uid is not None else -1,
                 "timestamp": item.get("timestamp")
                     or datetime.now().isoformat(timespec="seconds"),
+                "meta_json": meta_str,
             })
 
         if records:
@@ -286,14 +340,33 @@ class LanceMemory:
             text = r.get("text", "")
             if max_chars > 0 and total_chars + len(text) > max_chars:
                 break
-            out.append({
+
+            meta = {}
+            raw_meta = r.get("meta_json")
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta)
+                except Exception:
+                    meta = {}
+
+            item = {
                 "text": text,
                 "category": r.get("category", "general"),
                 "source": r.get("source", "reflection"),
                 "user_id": (None if r.get("user_id") == -1
                             else r.get("user_id")),
                 "timestamp": r.get("timestamp", ""),
-            })
+                "_score": score,
+            }
+            if meta:
+                item["_meta"] = meta
+                item["valence"] = meta.get("valence")
+                item["mood_at_time"] = meta.get("mood_at_time")
+                item["trust_at_time"] = meta.get("trust_at_time")
+                item["intimacy_at_time"] = meta.get("intimacy_at_time")
+                item["top_sins"] = meta.get("top_sins")
+
+            out.append(item)
             total_chars += len(text)
 
         return out
@@ -329,6 +402,5 @@ class LanceMemory:
             return []
 
 
-# Глобальный экземпляр — используется через алиас faiss_mem
 lance_mem = LanceMemory()
 lance_mem.load()

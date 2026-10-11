@@ -376,8 +376,10 @@ async def try_reach_out(client, user_id: int) -> bool:
                 print(f"   🖼 Фото отправлено")
                 try:
                     add_message(
-                        user_id, "assistant",
-                        f"[отправила фото: {image_prompt[:80]}]",
+                        user_id, "system",
+                        f"[СИСТЕМА] Ты только что отправила ему фото: "
+                        f"{image_prompt[:80]}. Это факт из прошлого, "
+                        f"НЕ пиши такие пометки в своих сообщениях.",
                         max_history=MAX_HISTORY,
                     )
                 except Exception:

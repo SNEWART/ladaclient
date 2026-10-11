@@ -67,28 +67,78 @@ def detect_yes_no(text: str):
     return None
 
 
+# ─── Очистка действий в звёздочках ───
+#
+# Ловим и короткие (*улыбнулась*), и длинные (*я пытаюсь описать её,
+# вспоминаю форму, цвет, свет...*). Раньше лимит был 80 символов в
+# одну строку — длинные блоки и многострочные не удалялись.
+#
+# Порядок: сначала многострочные *...* (DOTALL), потом одиночные.
+
+_MULTILINE_ACTION = re.compile(r'\*{1,2}[^*]{5,400}?\*{1,2}', re.DOTALL)
+_INLINE_ACTION = re.compile(r'\*[^*\n]{1,200}\*')
+_DOUBLE_STAR = re.compile(r'\*\*[^*\n]{1,200}\*\*')
+
+
 def strip_asterisk_actions(text: str) -> tuple:
-    """
-    Убирает *действия* из текста. Возвращает (очищенный, было_ли_что_то).
-    """
     if not text:
         return text, False
     before = text
-    text = re.sub(r'\*[^*\n]{1,80}\*', '', text)
+
+    # Сначала **bold** — но только если это внутри текста, не отдельное
+    # слово: *** и **** редки в живой речи, но **...** бывает как
+    # «действие». Если это чистое **слово** без пробелов — оставим.
+    text = _DOUBLE_STAR.sub(
+        lambda m: m.group(0)[2:-2]
+        if " " in m.group(0)[2:-2] else m.group(0),
+        text,
+    )
+
+    # Одиночные *действия* — включая многострочные.
+    text = _INLINE_ACTION.sub('', text)
+    text = _MULTILINE_ACTION.sub('', text)
+
+    # Чистим повисшие пробелы и пустые строки.
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
+
+    return text, (text != before)
+
+
+# ─── Очистка «псевдо-пометок», которые модель имитирует ───
+#
+# Модель видит в истории "[отправила фото: ...]" и начинает писать
+# похожее. Формат не наш — вырезаем молча.
+
+_FAKE_NOTE = re.compile(
+    r'\[\s*отправил[аи]?\s+(?:фото|стикер|картинку|изображение)'
+    r'(?::[^\]]*)?\]\s*',
+    re.IGNORECASE,
+)
+_FAKE_NOTE_2 = re.compile(
+    r'\[\s*(?:фото|стикер)\s+отправлен[оа]?\s*\]\s*',
+    re.IGNORECASE,
+)
+_FAKE_NOTE_3 = re.compile(
+    r'\[\s*сгенерировал[аи]?\s+фото[^\]]*\]\s*',
+    re.IGNORECASE,
+)
+
+
+def strip_fake_notes(text: str) -> tuple:
+    if not text:
+        return text, False
+    before = text
+    text = _FAKE_NOTE.sub('', text)
+    text = _FAKE_NOTE_2.sub('', text)
+    text = _FAKE_NOTE_3.sub('', text)
+    text = re.sub(r'^\s+', '', text, flags=re.MULTILINE).strip()
     return text, (text != before)
 
 
 def strip_question_echo(reply: str, user_msg: str) -> str:
-    """
-    Убирает эхо вопроса пользователя в начале ответа.
-    Пример: юзер "что а я ?", ответ "А ты?\nНу ты же сам сказал..." →
-    → "Ну ты же сам сказал..."
-    Работает как страховка поверх llm._strip_echo_first_line.
-    """
     if not reply or not user_msg:
         return reply
 
