@@ -52,7 +52,6 @@ IMAGE_TRIGGERS = [
     "как ты выглядишь", "сфоткайся", "сделай фото",
     "сделай селфи", "покажи как ты", "где ты сейчас",
     "покажи мусю", "покажи кошку", "фото кота", "фото кошки",
-    # Расширение — падежи и формы глагола.
     "показать мусю", "показать кошку", "показать мне мусю",
     "показать мне кошку", "показать фото", "показать мне фото",
     "показать себя", "показать мне себя",
@@ -70,16 +69,27 @@ SEARCH_TRIGGERS = [
 EMOTIONAL_TOP_K = 12
 EMOTIONAL_MAX_CHARS = 4000
 
+IGNORED_USER_IDS = {777000, 7770000}
+
+
+def _he_worries_you_are_gone(msg: str) -> bool:
+    if not msg:
+        return False
+    low = msg.lower()
+    triggers = [
+        "ты пропала", "куда пропала", "ты где", "ты тут",
+        "ты не отвечаешь", "куда делась", "ты ещё здесь",
+        "ты молчишь", "алло", "ты жива", "не отвечала",
+        "пропала куда", "не отвечала долго", "ты вообще тут",
+    ]
+    return any(t in low for t in triggers)
+
 
 def _user_requested_photo(text: str) -> bool:
-    """Расширенная проверка: запрос фото или кошки.
-    Ищет ключевые объекты (муся/кошк/кот/фото/селфи/себя) вместе
-    с глаголами (покажи/показать/пришли/хочу/можно)."""
     low = text.lower()
     for t in IMAGE_TRIGGERS:
         if t in low:
             return True
-    # Мягкая эвристика: объект + запрос.
     has_object = any(w in low for w in
                      ("мусю", "муся", "муси", "кошк", "кот", "фото",
                       "фотк", "селфи", "себя", "картинк"))
@@ -156,10 +166,22 @@ async def process_batch(batch: list):
 
     user_id = batch[0].user_id
     chat_id = batch[0].chat_id
+
+    if user_id in IGNORED_USER_IDS:
+        log(f"⏭ Служебный ID {user_id}, пропускаю")
+        return
+
     user_display = users_names.display_name(user_id)
 
     log(f"📥 Из очереди: {len(batch)} сообщ. от {user_display} "
         f"(осталось: {message_queue.size()})")
+
+    # Если он ответил — сбрасываем счётчик инициатив
+    try:
+        from lada.brain import initiative as _init
+        _init.on_user_replied(user_id)
+    except Exception:
+        pass
 
     touch_activity()
     await set_online(client)
@@ -262,39 +284,24 @@ async def process_batch(batch: list):
         max_chars=EMOTIONAL_MAX_CHARS,
         min_score=0.25,
     )
-    related = [r for r in candidates if r.get("category") != "emotion"]
-    emotional = [r for r in candidates if r.get("category") == "emotion"]
 
-    if related:
-        knowledge_text = "\n".join(
-            _format_memory_line(r) for r in related
-        )
-        history = history + [{
-            "role": "system",
-            "content": (
-                f"=== ВОСПОМИНАНИЯ (учитывай их окраску) ===\n"
-                f"{knowledge_text}\n"
-                f"(v>0 — приятное, v<0 — неприятное, "
-                f"без v — нейтральный факт)"
-            )
-        }]
-        log(f"   🧠 память: {len(related)} записей, "
-            f"{len(knowledge_text)} симв.")
+    if candidates:
+        from lada.core.memory_hierarchy import format_hierarchical
+        hier_text = format_hierarchical(candidates)
+        if hier_text:
+            history = history + [{"role": "system", "content": hier_text}]
+            n_facts = sum(1 for c in candidates
+                          if c.get("category") == "observation"
+                          and c.get("valence") is None)
+            n_emo = sum(1 for c in candidates
+                        if c.get("category") == "emotion")
+            log(f"   🧠 память: {len(candidates)} записей "
+                f"(факты≈{n_facts}, эмоции≈{n_emo}), "
+                f"{len(hier_text)} симв.")
+        else:
+            log(f"   🧠 память: пусто после раскладки")
     else:
         log(f"   🧠 память: пусто")
-
-    if emotional:
-        emo_text = "\n".join(
-            f"  - {r.get('text', '')[:160]}"
-            for r in emotional[:3]
-        )
-        history = history + [{
-            "role": "system",
-            "content": (
-                f"=== ТВОИ НЕДАВНИЕ ЭМОЦИИ ПО ЭТОМУ ЧЕЛОВЕКУ ===\n"
-                f"{emo_text}"
-            )
-        }]
 
     user_requested_photo = _user_requested_photo(combined)
 
@@ -309,7 +316,27 @@ async def process_batch(batch: list):
         current_msg_count=full_history_count,
         user_requested_photo=user_requested_photo,
     )
-    history = history + [{"role": "system", "content": brief}]
+    if brief.get("facts"):
+        history = history + [{"role": "system", "content": brief["facts"]}]
+    _style_brief = brief.get("style", "")
+
+    # Внедрение pending инициативы
+    try:
+        from lada.brain import pending as pending_mod
+        pending_data = pending_mod.get_pending(user_id)
+        if pending_data:
+            pending_block = (
+                f"=== У ТЕБЯ БЫЛА ЗАГОТОВКА ===\n"
+                f"Ты собиралась написать: «{pending_data['message']}»\n"
+                f"Причина: {pending_data['reason']}\n"
+                f"Сейчас он написал сам. Можешь упомянуть, что думала ему написать, "
+                f"и вплести эту мысль — если уместно. Не используй штампы."
+            )
+            history = history + [{"role": "system", "content": pending_block}]
+            pending_mod.delete_pending(user_id)
+            log("   📬 Pending инициатива вплетена в контекст и удалена")
+    except Exception as e:
+        log(f"   ⚠️ pending injection: {e}")
 
     auto_search_block = None
     if (WEB_SEARCH_ENABLED
@@ -366,6 +393,9 @@ async def process_batch(batch: list):
             )
         }]
 
+    if _style_brief:
+        history = history + [{"role": "system", "content": _style_brief}]
+
     reply = ""
     thinking = ""
     round_num = 0
@@ -414,7 +444,6 @@ async def process_batch(batch: list):
     if reply != _before:
         log(f"   ✂️  Срезано эхо вопроса: «{_before[:40]}…»")
 
-    # Порядок: сначала фейковые пометки, потом звёздочки.
     reply, fake_stripped = strip_fake_notes(reply)
     if fake_stripped:
         log("   ✂️  Срезаны псевдо-пометки [отправила …] из ответа")
@@ -424,25 +453,47 @@ async def process_batch(batch: list):
         log("   ✂️  Срезаны *действия* из ответа")
 
     if "[SILENCE]" in reply:
-        log("   🤐 Модель решила промолчать.")
-        add_silence_marker(user_id, max_history=MAX_HISTORY)
-        unread.append(user_id, combined)
+        if _he_worries_you_are_gone(combined):
+            log("   🔄 Модель хотела [SILENCE], но он беспокоится — "
+                "прошу ответить заново")
+            history_retry = history + [
+                {"role": "assistant", "content": reply},
+                {"role": "system",
+                 "content": (
+                     "🔴 ОН СПРАШИВАЕТ, ГДЕ ТЫ. Не молчи. "
+                     "Ответь коротко: «тут я», «да здесь, закрутилась», "
+                     "«на работе была». Без [SILENCE]."
+                 )},
+            ]
+            reply = await asyncio.to_thread(ask_text, history_retry)
+            reply = reply.replace("[SILENCE]", "").strip()
+            if not reply.strip():
+                reply = "Тут я, извини."
+        else:
+            log("   🤐 Модель решила промолчать.")
+            add_silence_marker(user_id, max_history=MAX_HISTORY)
+            unread.append(user_id, combined)
 
-        async def _silent_processing():
-            await asyncio.sleep(3)
-            try:
-                await evaluate_and_update(
-                    user_id, combined, "[промолчала]", user_display
-                )
-            except Exception as e:
-                log(f"   ⚠️ silent combined_eval: {e}")
-            try:
-                await wm_update(user_id, combined, "[промолчала]", user_display)
-            except Exception as e:
-                log(f"   ⚠️ silent WM: {e}")
+            async def _silent_processing():
+                await asyncio.sleep(3)
+                try:
+                    await evaluate_and_update(
+                        user_id, combined, "[промолчала]", user_display
+                    )
+                except Exception as e:
+                    log(f"   ⚠️ silent combined_eval: {e}")
+                try:
+                    await wm_update(user_id, combined, "[промолчала]", user_display)
+                except Exception as e:
+                    log(f"   ⚠️ silent WM: {e}")
+                try:
+                    from lada.app import post_response
+                    await post_response.run(user_id, combined, "")
+                except Exception as e:
+                    log(f"   ⚠️ silent post_response: {e}")
 
-        asyncio.create_task(_silent_processing())
-        return
+            asyncio.create_task(_silent_processing())
+            return
 
     remember_matches = re.findall(
         r'\[REMEMBER\]\s*(.+?)(?=\n\[|\Z)', reply, re.DOTALL
@@ -500,15 +551,12 @@ async def process_batch(batch: list):
     image_hint = None
     image_subject = "lada"
 
-    # pet: явно указан — фото кошки.
     match = re.search(r'\[IMAGE\]\s*pet:\s*(.+)', reply)
     if match:
         image_hint = match.group(1).strip()
         image_subject = "pet"
         reply = reply.replace(match.group(0), "").strip()
     else:
-        # Иначе — обычный hint. Но если в hint явно про кошку/кота
-        # и не про Ладу — переключаем на pet автоматически.
         match = re.search(r'\[IMAGE\]\s*(?:hint:\s*)?(.+)', reply)
         if match:
             image_hint = match.group(1).strip()
@@ -578,6 +626,11 @@ async def process_batch(batch: list):
                                         user_display)
                     except Exception as e:
                         log(f"   ⚠️ silent WM: {e}")
+                    try:
+                        from lada.app import post_response
+                        await post_response.run(user_id, combined, "")
+                    except Exception as e:
+                        log(f"   ⚠️ silent post_response: {e}")
 
                 asyncio.create_task(_silent_processing_2())
                 return
@@ -585,9 +638,6 @@ async def process_batch(batch: list):
     if image_prompt:
         log(f"   🎨 Итоговый промпт ({image_subject}): {image_prompt[:140]}")
 
-    # Важно: в историю пишем ОТВЕТ БЕЗ технических пометок,
-    # и БЕЗ упоминания, что мы что-то сгенерировали. Иначе модель
-    # научится имитировать формат.
     add_message(user_id, "assistant", reply, max_history=MAX_HISTORY)
 
     if need_sticker:
@@ -641,7 +691,6 @@ async def process_batch(batch: list):
                     len(get_history(user_id)),
                     image_prompt,
                 )
-                # В историю — как system, а не как её слова.
                 add_message(
                     user_id, "system",
                     f"[СИСТЕМА] Ты отправила ему фото ({image_subject}). "
@@ -664,7 +713,6 @@ async def process_batch(batch: list):
             except Exception as e:
                 log(f"   ⚠️ Не удалось отправить изображение: {e}")
         else:
-            # Генерация упала — не оставляем пользователя с «Сейчас, секунду.»
             log(f"   ⚠️ Генерация не вернула путь, пробую текстом")
             try:
                 apology_history = history + [
@@ -688,6 +736,12 @@ async def process_batch(batch: list):
                 await evaluate_and_update(user_id, combined, reply, user_display)
             except Exception as e:
                 log(f"   ⚠️ combined_eval: {e}")
+
+            try:
+                from lada.app import post_response
+                await post_response.run(user_id, combined, reply)
+            except Exception as e:
+                log(f"   ⚠️ post_response: {e}")
 
         asyncio.create_task(_combined_later())
 

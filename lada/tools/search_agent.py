@@ -1,12 +1,9 @@
 # search_agent.py — решает, нужен ли поиск, и формирует КОНКРЕТНЫЙ запрос.
 #
-# FIX: используем нативный JSON-режим Ollama (format="json").
-# Модель физически не может ответить не-JSON. Это убирает 90%
-# случаев "не удалось распарсить JSON".
-#
-# FIX: при провале логируем сырой ответ модели (первые 200 симв.)
-# — чтобы понимать, что она генерирует, если JSON всё равно не
-# получился.
+# FIX: короткий, конкретный промпт. Раньше модель копировала слова
+# из анти-промпта («Лада, Пользователь, диалог, эмоции»).
+# Теперь — минимум примеров, максимум конкретики.
+# FIX: retry с минимальным промптом — если первый парс упал.
 
 import json
 import re
@@ -21,33 +18,27 @@ from config import (
 
 
 _PROMPT = (
-    "Ты — вспомогательный агент-планировщик поиска. "
-    "Реши, нужен ли поиск в интернете, чтобы ответить на сообщение, "
-    "и сформулируй конкретный запрос.\n\n"
-    "🔴 ИСКАТЬ ТОЛЬКО ВНЕШНИЕ ФАКТЫ. Интернет не знает ничего про "
-    "Ладу, про пользователя и про их диалог.\n\n"
+    "Реши, нужен ли поиск в интернете, чтобы ответить на сообщение.\n"
+    "\n"
+    "ИСКАТЬ ТОЛЬКО:\n"
+    "  — новости, погода, курсы валют\n"
+    "  — характеристики товаров, цены, даты выхода\n"
+    "  — публичные факты (знаменитости, компании, страны)\n"
+    "  — явная просьба: «погугли», «найди», «поищи»\n"
+    "\n"
     "НЕ ИСКАТЬ:\n"
-    "- про саму Ладу, про её жизнь, настроение, дела\n"
-    "- про пользователя личное (работа, здоровье, семья, эмоции)\n"
-    "- про диалог («что мы обсуждали», «что он говорил»)\n"
-    "- приветствия, «как дела», «что нового у тебя»\n"
-    "- философию, мнения, чувства\n\n"
-    "ИСКАТЬ:\n"
-    "- новости, погода, курс валют, биржа, цены\n"
-    "- характеристики товаров, даты выхода, цены продуктов\n"
-    "- публичные факты о знаменитостях, компаниях, странах\n"
-    "- явная просьба: «погугли», «найди», «поищи»\n\n"
-    "Если тема ссылается на контекст («этот ноут», «про него», "
-    "«подробнее») — включи тему из контекста в запрос.\n\n"
-    "ЗАПРОС должен быть конкретным: модель, год, место.\n"
-    "Не «новости США», а «новости США выборы октябрь 2026».\n"
-    "Не «характеристики ноута», а «MacBook Neo 2026 характеристики».\n\n"
-    "Верни СТРОГО JSON:\n"
-    "{\n"
-    '  "search": true или false,\n'
-    '  "query": "конкретный поисковый запрос 3-12 слов или пустая строка",\n'
-    '  "reason": "кратко почему"\n'
-    "}"
+    "  — приветствия и светские фразы\n"
+    "  — эмоции, чувства, философию\n"
+    "  — про собеседника, про диалог, про Ладу\n"
+    "  — если неясно, о чём речь\n"
+    "\n"
+    "Если search=true — сформулируй конкретный запрос 3-10 слов.\n"
+    "Не «новости», а «новости США выборы октябрь 2026».\n"
+    "Не «характеристики ноута», а «MacBook Neo 2026 характеристики».\n"
+    "\n"
+    "Верни JSON:\n"
+    '{"search": true|false, "query": "запрос или пустая строка", '
+    '"reason": "кратко"}'
 )
 
 
@@ -92,7 +83,6 @@ def available() -> bool:
 
 
 def _extract_json(text: str):
-    """Парсит JSON из ответа. Работает и с чистым JSON, и с обёрнутым."""
     if not text:
         return None
     text = text.strip()
@@ -114,42 +104,50 @@ def _extract_json(text: str):
 def _build_user_block(history: list, current_msg: str) -> str:
     lines = []
     if history:
-        lines.append("КОНТЕКСТ (последние сообщения):")
-        for m in history[-6:]:
-            role = "Пользователь" if m.get("role") == "user" else "Лада"
-            content = (m.get("content") or "").strip()[:300]
+        lines.append("Последние сообщения:")
+        for m in history[-4:]:
+            role = "Он" if m.get("role") == "user" else "Я"
+            content = (m.get("content") or "").strip()[:200]
             if content:
                 lines.append(f"  {role}: {content}")
         lines.append("")
 
-    lines.append("ТЕКУЩЕЕ СООБЩЕНИЕ:")
-    lines.append(f"  {current_msg[:600]}")
-    lines.append("")
-    lines.append("Реши, нужен ли поиск. Если про Ладу, про пользователя, "
-                 "про диалог или про эмоции — search=false.")
+    lines.append("Текущее сообщение:")
+    lines.append(f"  {current_msg[:400]}")
     return "\n".join(lines)
 
 
 def _looks_like_self_topic(query: str) -> bool:
-    """Программный фильтр: если в query упоминается Лада/диалог — не искать."""
     low = query.lower()
     bad_markers = [
         "лада", "лады", "ладе", "ладу", "ладо",
         "пользователь", "собеседник",
         "диалог", "разговор", "мы обсуждали",
         "как прошла", "как спалось", "как дела у",
+        "эмоции", "чувства", "отношения",
     ]
     return any(m in low for m in bad_markers)
 
 
-def _call_model(system: str, user: str, num_predict: int = 300):
-    """
-    Один вызов ollama с JSON-режимом.
-    Возвращает dict или None.
-    """
+def _looks_like_garbage(query: str) -> bool:
+    """Запрос-мусор: слишком короткий, длинный, или сплошные общие слова."""
+    q = query.strip()
+    if len(q) < 3 or len(q) > 120:
+        return True
+    # Все слова стоп-слова?
+    words = [w for w in re.findall(r'\w{3,}', q.lower())]
+    if not words:
+        return True
+    stop = {"что", "как", "где", "когда", "почему", "зачем",
+            "это", "есть", "быть", "можно", "нужно",
+            "the", "and", "for", "with", "that"}
+    real = [w for w in words if w not in stop]
+    return len(real) < 1
+
+
+def _call_model(system: str, user: str, num_predict: int = 200):
     try:
         try:
-            # Нативный JSON-режим — есть в свежих версиях ollama
             resp = ollama.chat(
                 model=SEARCH_AGENT_MODEL,
                 messages=[
@@ -158,11 +156,10 @@ def _call_model(system: str, user: str, num_predict: int = 300):
                 ],
                 format="json",
                 think=False,
-                keep_alive="30s",
-                options={"temperature": 0.1, "num_predict": num_predict},
+                keep_alive="5m",
+                options={"temperature": 0.0, "num_predict": num_predict},
             )
         except TypeError:
-            # Старая версия ollama без format — без JSON-режима
             resp = ollama.chat(
                 model=SEARCH_AGENT_MODEL,
                 messages=[
@@ -170,8 +167,8 @@ def _call_model(system: str, user: str, num_predict: int = 300):
                     {"role": "user", "content": user},
                 ],
                 think=False,
-                keep_alive="30s",
-                options={"temperature": 0.1, "num_predict": num_predict},
+                keep_alive="5m",
+                options={"temperature": 0.0, "num_predict": num_predict},
             )
     except Exception as e:
         print(f"   ⚠️ search_agent: {e}")
@@ -179,14 +176,13 @@ def _call_model(system: str, user: str, num_predict: int = 300):
 
     msg = resp.get("message", {})
     content = (msg.get("content") or "").strip()
+    if not content:
+        content = (msg.get("thinking") or "").strip()
 
     data = _extract_json(content)
     if isinstance(data, dict):
         return data
-
-    # Логируем сырой ответ при провале — для диагностики
-    print(f"   ⚠️ search_agent: не удалось распарсить. "
-          f"content={content[:200]!r}")
+    print(f"   ⚠️ search_agent: не распарсилось: {content[:120]!r}")
     return None
 
 
@@ -201,40 +197,38 @@ def decide_search(user_msg: str, history: list = None) -> dict:
         return default
 
     user_block = _build_user_block(history or [], user_msg)
+    data = _call_model(_PROMPT, user_block, num_predict=200)
 
-    # Первая попытка: полный промпт
-    data = _call_model(_PROMPT, user_block, num_predict=300)
-
-    # Retry: минимальный промпт, только текущее сообщение
     if data is None:
         print("   🔄 search_agent: retry с минимальным промптом")
-        short_prompt = (
-            "Реши, нужен ли поиск в интернете. "
-            "ИСКАТЬ ТОЛЬКО: новости, погода, курс валют, характеристики "
-            "товаров, публичные факты. "
-            "НЕ ИСКАТЬ: про Ладу, про пользователя, про диалог, эмоции, "
-            "приветствия, «как дела». "
-            "JSON: {\"search\": bool, \"query\": \"запрос\", \"reason\": \"почему\"}"
+        short_system = (
+            "Ответь JSON: нужен ли поиск в интернете? "
+            "Искать только: новости, погода, курсы, товары, "
+            "публичные факты. Не искать: приветствия, эмоции, "
+            "про собеседника и диалог. "
+            '{"search": bool, "query": "3-10 слов", "reason": "кратко"}'
         )
-        short_block = f"Сообщение: {user_msg[:400]}"
-        data = _call_model(short_prompt, short_block, num_predict=200)
+        data = _call_model(short_system, user_msg[:300], num_predict=150)
 
     if not isinstance(data, dict):
         return {"search": False, "query": "",
-                "reason": "не удалось распарсить JSON после retry"}
+                "reason": "не удалось распарсить после retry"}
 
     search = bool(data.get("search"))
     query = (data.get("query") or "").strip()
     reason = (data.get("reason") or "").strip()
 
     if search and not query:
-        search = False
-        reason = "search=true без query"
+        return {"search": False, "query": "",
+                "reason": "search=true без query"}
 
     if search and _looks_like_self_topic(query):
-        search = False
-        reason = f"self-topic отсечён: {query[:60]}"
-        query = ""
+        return {"search": False, "query": "",
+                "reason": f"self-topic: {query[:60]}"}
+
+    if search and _looks_like_garbage(query):
+        return {"search": False, "query": "",
+                "reason": f"garbage query: {query[:60]}"}
 
     if search and query:
         query = _enrich_query(query)

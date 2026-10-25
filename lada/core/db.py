@@ -145,6 +145,75 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         last_initiative TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS promises (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL,
+        text          TEXT NOT NULL,
+        made_at       TEXT NOT NULL,
+        deadline      TEXT,
+        fulfilled     INTEGER DEFAULT 0,
+        fulfilled_at  TEXT,
+        dismissed     INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_promises_user
+        ON promises(user_id, fulfilled, dismissed);
+
+    CREATE TABLE IF NOT EXISTS mood_history (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        mood      TEXT NOT NULL,
+        valence   REAL NOT NULL,
+        ts        TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mood_history_ts
+        ON mood_history(ts DESC);
+
+    CREATE TABLE IF NOT EXISTS lada_life_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        text        TEXT NOT NULL,
+        kind        TEXT,
+        valence     REAL,
+        created_at  TEXT NOT NULL,
+        consumed    INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_life_created
+        ON lada_life_events(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS emotional_peaks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER,
+        text        TEXT NOT NULL,
+        source      TEXT,
+        valence     REAL,
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_peaks_created
+        ON emotional_peaks(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS companion_styles (
+        user_id     INTEGER PRIMARY KEY,
+        style_json  TEXT,
+        updated     TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS pending_initiatives (
+        user_id                     INTEGER PRIMARY KEY,
+        message                     TEXT NOT NULL,
+        reason                      TEXT,
+        scheduled_at                TEXT NOT NULL,
+        created_at                  TEXT NOT NULL,
+        mood_valence_at_creation    REAL,
+        regen_count                 INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_sched
+        ON pending_initiatives(scheduled_at);
+
+    CREATE TABLE IF NOT EXISTS initiative_attempts (
+        user_id       INTEGER PRIMARY KEY,
+        attempts      INTEGER DEFAULT 0,
+        last_attempt  TEXT,
+        last_answered TEXT
+    );
     """)
 
     # Виртуальный "юзер" для глобальных таблиц

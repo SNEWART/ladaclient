@@ -1,5 +1,10 @@
 # run.py — единый супервизор: .env → ollama serve → Stable Diffusion → main.py
 # + watchdog: правки .py перезапускают только main.py.
+#
+# FIX: FileWatcher теперь проверяет mtime перед перезапуском.
+# На Windows чтение файлов часто приходит как "modified" (антивирус,
+# OneDrive, NTFS) — раньше это вызывало ложные перезапуски и крашило
+# веб-панель при открытии вкладок.
 
 import argparse
 import os
@@ -14,8 +19,18 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG_OK = True
+except Exception as e:
+    print(f"⚠️ watchdog недоступен ({e}), хот-релоад отключён")
+    Observer = None
+
+    class FileSystemEventHandler:
+        pass
+
+    _WATCHDOG_OK = False
 
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
@@ -107,7 +122,7 @@ def _quick_health(url: str, timeout: float = 1.5) -> bool:
         return False
 
 
-def _wrap_cmd_for_windows(cmd: list[str]) -> list[str]:
+def _wrap_cmd_for_windows(cmd: list) -> list:
     if os.name != "nt" or not cmd:
         return cmd
     first = cmd[0].lower()
@@ -117,11 +132,7 @@ def _wrap_cmd_for_windows(cmd: list[str]) -> list[str]:
 
 
 def _find_git(sd_cwd: Path | None = None) -> str | None:
-    """Ищет git.exe в стандартных местах, в папке SD и в PATH.
-    Не скачивает ничего, только находит уже установленный."""
-    candidates: list[Path] = []
-
-    # 1) Внутри папки SD (портативные сборки часто кладут git сюда)
+    candidates = []
     if sd_cwd:
         candidates += [
             sd_cwd / "git" / "cmd" / "git.exe",
@@ -129,8 +140,6 @@ def _find_git(sd_cwd: Path | None = None) -> str | None:
             sd_cwd / "PortableGit" / "cmd" / "git.exe",
             sd_cwd / "PortableGit" / "bin" / "git.exe",
         ]
-
-    # 2) Системные места Windows
     for p in (
         r"C:\Program Files\Git\cmd\git.exe",
         r"C:\Program Files (x86)\Git\cmd\git.exe",
@@ -138,12 +147,9 @@ def _find_git(sd_cwd: Path | None = None) -> str | None:
         r"C:\Program Files (x86)\Git\bin\git.exe",
     ):
         candidates.append(Path(p))
-
-    # 3) PATH (то, что видит обычная консоль)
     which = shutil.which("git")
     if which:
         candidates.append(Path(which))
-
     for c in candidates:
         try:
             if c.exists() and c.is_file():
@@ -159,7 +165,7 @@ class Service:
     def __init__(
         self,
         name: str,
-        command: list[str],
+        command: list,
         cwd: Path = PROJECT_ROOT,
         env: dict | None = None,
         health_url: str | None = None,
@@ -211,8 +217,7 @@ class Service:
                 )
             except FileNotFoundError as e:
                 if self.optional:
-                    log(f"[{self.name}] ⚠️ не найден ({e}) — пропускаю. "
-                        f"Пропиши полный путь в .env")
+                    log(f"[{self.name}] ⚠️ не найден ({e}) — пропускаю.")
                     self._stop = True
                     return
                 raise
@@ -324,8 +329,28 @@ class Service:
 # ---------------------------- файловый watcher ---------------------------
 
 class FileWatcher(FileSystemEventHandler):
+    """
+    FIX: следит за .py, но перезапускает только если mtime реально
+    изменился. На Windows чтение файла, антивирус, OneDrive и
+    индексатор приходят как 'modified' — раньше это крашило панель.
+    """
+
     def __init__(self, service: Service):
         self.service = service
+        self._mtimes: dict = {}
+        self._init_mtimes()
+
+    def _init_mtimes(self):
+        try:
+            for f in PROJECT_ROOT.rglob("*.py"):
+                if any(part in IGNORED_DIRS for part in f.parts):
+                    continue
+                try:
+                    self._mtimes[str(f)] = f.stat().st_mtime
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def on_modified(self, event):
         if event.is_directory:
@@ -337,14 +362,30 @@ class FileWatcher(FileSystemEventHandler):
             return
         if not path.name.endswith(".py"):
             return
-        log(f"🔄 Изменён {path.name}")
+
+        try:
+            current_mtime = path.stat().st_mtime
+        except Exception:
+            return
+
+        old_mtime = self._mtimes.get(str(path))
+        if old_mtime is not None and abs(current_mtime - old_mtime) < 0.01:
+            # mtime не изменился — ложное срабатывание, игнорируем
+            return
+
+        self._mtimes[str(path)] = current_mtime
+        try:
+            rel = path.relative_to(PROJECT_ROOT)
+        except Exception:
+            rel = path
+        log(f"🔄 Изменён {rel}")
         self.service.restart()
 
 
 # ------------------------------- сборка ----------------------------------
 
-def build_services(args) -> tuple[list[Service], Service | None]:
-    deps: list[Service] = []
+def build_services(args):
+    deps: list = []
 
     # --- Ollama ---
     if not args.no_ollama:
@@ -379,17 +420,15 @@ def build_services(args) -> tuple[list[Service], Service | None]:
                 if candidate.exists():
                     parts[0] = str(candidate)
 
-            # Ищем git только внутри папки SD и в системе
             sd_env = _child_env()
             git_path = _find_git(sd_cwd)
             if git_path:
                 sd_env["GIT"] = git_path
                 git_dir = str(Path(git_path).parent)
-                current_path = sd_env.get("PATH", "")
-                sd_env["PATH"] = git_dir + os.pathsep + current_path
+                sd_env["PATH"] = git_dir + os.pathsep + sd_env.get("PATH", "")
                 log(f"[sd] git найден: {git_path}")
             else:
-                log("[sd] ⚠️ git не найден — A1111 может упасть на fetch assets")
+                log("[sd] ⚠️ git не найден")
 
             deps.append(Service(
                 name="sd",
@@ -443,7 +482,7 @@ def main():
         args.no_ollama = True
 
     deps, main_service = build_services(args)
-    all_services: list[Service] = list(deps)
+    all_services: list = list(deps)
 
     run_main = args.only in (None, "main")
     if run_main:
@@ -460,10 +499,15 @@ def main():
         main_service.start()
 
     observer = None
-    if not args.no_watch and run_main:
-        observer = Observer()
-        observer.schedule(FileWatcher(main_service), str(PROJECT_ROOT), recursive=True)
-        observer.start()
+    if not args.no_watch and run_main and _WATCHDOG_OK:
+        try:
+            observer = Observer()
+            observer.schedule(FileWatcher(main_service), str(PROJECT_ROOT), recursive=True)
+            observer.start()
+            log("👀 Watchdog запущен (mtime-проверка)")
+        except Exception as e:
+            log(f"⚠️ Watchdog не запустился: {e}")
+            observer = None
 
     try:
         PID_FILE.parent.mkdir(parents=True, exist_ok=True)

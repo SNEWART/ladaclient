@@ -3,6 +3,9 @@
 # Обогащение: каждая запись может нести meta-словарь (valence, mood_at_time,
 # trust_at_time, intimacy_at_time, top_sins). Храним как JSON-строку в поле
 # meta_json. Для старых таблиц колонка добавляется автоматически при загрузке.
+#
+# FIX: для эмбеддингов передаём num_ctx=512 — иначе bge-m3 просит 4096
+# и съедает лишние 3 ГБ VRAM впустую.
 
 import hashlib
 import json
@@ -135,7 +138,6 @@ class LanceMemory:
                 "timestamp": (cols["timestamp"][i]
                               if "timestamp" in cols else ""),
             }
-            # Распаковываем meta на верхний уровень — удобно для search-фильтров
             if meta:
                 item["_meta"] = meta
                 item["valence"] = meta.get("valence")
@@ -197,7 +199,10 @@ class LanceMemory:
             return cached
         try:
             resp = ollama.embed(
-                model=EMBEDDING_MODEL, input=text, keep_alive="30m"
+                model=EMBEDDING_MODEL,
+                input=text,
+                keep_alive="30m",
+                options={"num_ctx": 512},
             )
             vec = np.asarray(resp["embeddings"][0], dtype=np.float32)
             norm = np.linalg.norm(vec)
@@ -209,6 +214,48 @@ class LanceMemory:
         except Exception as e:
             self._report_embedding_broken(e)
             return None
+
+    def _embed_batch(self, texts: list) -> list:
+        if not texts:
+            return []
+
+        results = [None] * len(texts)
+        to_compute = []
+        to_compute_idx = []
+
+        for i, t in enumerate(texts):
+            cached = self._cache_get(t)
+            if cached is not None:
+                results[i] = cached
+            else:
+                to_compute.append(t)
+                to_compute_idx.append(i)
+
+        if not to_compute:
+            return results
+
+        try:
+            resp = ollama.embed(
+                model=EMBEDDING_MODEL,
+                input=to_compute,
+                keep_alive="30m",
+                options={"num_ctx": 512},
+            )
+            embs = resp.get("embeddings", [])
+            for j, idx in enumerate(to_compute_idx):
+                if j >= len(embs):
+                    continue
+                vec = np.asarray(embs[j], dtype=np.float32)
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                self._cache_misses += 1
+                self._cache_put(to_compute[j], vec)
+                results[idx] = vec
+        except Exception as e:
+            self._report_embedding_broken(e)
+
+        return results
 
     def health_check(self):
         v = self._embed("health check")

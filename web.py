@@ -28,12 +28,18 @@ from lada.app.client import message_queue
 from web_ui.persona_api import router as persona_router
 from web_ui.auth import router as auth_router, require_auth
 from web_ui.ssh_terminal import router as ssh_terminal_router
+from web_ui.files_api import router as files_router
+from web_ui.memory_api import router as memory_router
+from web_ui.commands_api import router as commands_router
 
 
 app = FastAPI(title="Lada")
 app.include_router(auth_router)
 app.include_router(persona_router)
 app.include_router(ssh_terminal_router)
+app.include_router(files_router)
+app.include_router(memory_router)
+app.include_router(commands_router)
 
 WEB_CHAT_USER_ID = 999999999
 VIEW_USER_ID = OWNER_ID

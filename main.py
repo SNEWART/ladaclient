@@ -19,6 +19,10 @@ from config import (
     INITIATIVE_ENABLED, INITIATIVE_CHECK_INTERVAL_MINUTES,
     WEB_PORT, QUEUE_WORKER_COUNT, QUEUE_DEBOUNCE_SECS,
     MAX_HISTORY,
+    MEMORY_REACTOR_INTERVAL_MINUTES,
+    SELF_CONSISTENCY_INTERVAL_HOURS,
+    LIFE_LOG_INTERVAL_HOURS,
+    EMOTIONAL_PEAKS_INTERVAL_HOURS,
 )
 from lada.core.db import init_db, close_conn
 from lada.core.persona import get_persona
@@ -37,7 +41,9 @@ from lada.telegram.queue import QueuedMessage
 from lada.app.client import set_client, message_queue
 from lada.app.connection import connect_with_failover
 from lada.app.handlers import handler, process_batch
-from lada.app.loops import start_web, sins_regression_loop
+from lada.app.loops import (
+    start_web, sins_regression_loop, self_consistency_loop,
+)
 from lada.app.utils import log
 
 
@@ -249,10 +255,29 @@ async def main():
     log("⚖️ Регрессия шкал: раз в час")
 
     if INITIATIVE_ENABLED:
+        from lada.brain.pending_loop import pending_loop
+        asyncio.create_task(pending_loop(client))
+        log("⏰ Отложенные инициативы: проверка раз в 5 мин")
+
         asyncio.create_task(initiative_loop(client))
         log(f"💌 Инициатива: каждые {INITIATIVE_CHECK_INTERVAL_MINUTES} мин")
         asyncio.create_task(return_loop(client))
         log("↩️  Возврат: каждые 30 мин")
+
+    from lada.brain.memory_reactor import memory_reactor_loop
+    asyncio.create_task(memory_reactor_loop())
+    log(f"🧠 Реактор памяти: раз в {MEMORY_REACTOR_INTERVAL_MINUTES} мин")
+
+    asyncio.create_task(self_consistency_loop())
+    log(f"🪞 Портрет позиций: раз в {SELF_CONSISTENCY_INTERVAL_HOURS} ч")
+
+    from lada.brain.life_log import life_loop
+    asyncio.create_task(life_loop())
+    log(f"🌱 Жизнь Лады: новое событие раз в {LIFE_LOG_INTERVAL_HOURS} ч")
+
+    from lada.brain.emotional_peaks import peaks_loop
+    asyncio.create_task(peaks_loop())
+    log(f"💭 Эмоциональные пики: раз в {EMOTIONAL_PEAKS_INTERVAL_HOURS} ч")
 
     asyncio.create_task(start_web())
     log(f"🌐 Веб-панель: http://localhost:{WEB_PORT}")
