@@ -1,0 +1,182 @@
+# ИНСТРУКЦИЯ: Как исправить проблему переполнения контекста (12k → 8k)
+#
+# У вас есть ТРИ варианта решения. Выбирайте по ситуации:
+
+# ═══════════════════════════════════════════════════════════════
+# ВАРИАНТ 1: БЫСТРЫЙ ФИКС (5 минут)
+# ═══════════════════════════════════════════════════════════════
+# Просто урезать параметры в config.py
+# ✅ Плюсы: быстро, просто, сразу работает
+# ❌ Минусы: теряете функциональность, фиксированные значения
+
+# Откройте config.py и измените:
+MAX_HISTORY = 15  # было 30
+FAISS_MAX_CHARS = 3000  # было 8000
+SELF_CONSISTENCY_ENABLED = False
+LIFE_LOG_ENABLED = False
+EMOTIONAL_PEAKS_ENABLED = False
+COMPANION_STYLE_ENABLED = False
+
+# Это даст вам ~6.5-7k токенов вместо 12k
+
+# ═══════════════════════════════════════════════════════════════
+# ВАРИАНТ 2: ИСПОЛЬЗОВАТЬ config_optimized.py (10 минут)
+# ═══════════════════════════════════════════════════════════════
+# Готовый набор оптимизаций
+
+# 1. Бэкап:
+#    cp config.py config_backup.py
+
+# 2. Скопируйте настройки из config_optimized.py в свой config.py
+#    (только секции с параметрами, не весь файл)
+
+# 3. Перезапустите бота
+
+# ═══════════════════════════════════════════════════════════════
+# ВАРИАНТ 3: УМНЫЙ CONTEXT MANAGER (30-60 минут)
+# ═══════════════════════════════════════════════════════════════
+# Динамическая оптимизация на лету
+# ✅ Плюсы: адаптивно, максимум качества при лимите
+# ❌ Минусы: нужно интегрировать в код
+
+# Шаг 1: Установить tiktoken (для подсчёта токенов)
+# pip install tiktoken
+
+# Шаг 2: context_manager.py уже создан в lada/core/
+
+# Шаг 3: Интегрировать в handlers.py
+
+# ═══════════════════════════════════════════════════════════════
+# ИНТЕГРАЦИЯ CONTEXT MANAGER
+# ═══════════════════════════════════════════════════════════════
+
+# Добавьте в начало lada/app/handlers.py:
+"""
+from lada.core.context_manager import optimize_prompt_context
+
+# В функции process_batch() или где формируется промпт:
+# ПЕРЕД вызовом get_history() и faiss_mem.search()
+
+def process_message(...):
+    # ... ваш код ...
+
+    # НОВОЕ: Оптимизация контекста
+    ctx_optimization = optimize_prompt_context(
+        user_id=user_id,
+        message=text,
+        max_tokens=LLM_NUM_CTX,  # из config.py
+        config_enabled={
+            "topic_tracker_enabled": TOPIC_TRACKER_ENABLED,
+            "promise_tracker_enabled": PROMISE_TRACKER_ENABLED,
+            # ... и т.д. для всех модулей
+        }
+    )
+
+    # Используем оптимизированные значения:
+    history = get_history(
+        user_id,
+        limit=ctx_optimization["max_history"]  # динамически!
+    )
+
+    faiss_results = faiss_mem.search(
+        text,
+        top_k=FAISS_TOP_K,
+        max_chars=ctx_optimization["faiss_max_chars"]  # динамически!
+    )
+
+    # Проверяем, какие модули включать:
+    enabled_modules = set(ctx_optimization["enabled_modules"])
+
+    # В build_facts_brief() или где собираете промпт:
+    if "companion_model" in enabled_modules:
+        companion_block = companion_model.as_context_block(user_id)
+        # ... добавить в промпт
+
+    if "emotional_peaks" in enabled_modules:
+        peaks_block = emotional_peaks.as_context_block()
+        # ... добавить в промпт
+
+    # и т.д. для всех модулей
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# ПРОВЕРКА: Работает ли оптимизация?
+# ═══════════════════════════════════════════════════════════════
+
+# Добавьте в начало lada/core/llm.py (в функцию ask()):
+"""
+def ask(messages: list, temperature: float = None, num_predict: int = None):
+    # ... существующий код ...
+
+    # НОВОЕ: Подсчёт токенов для отладки
+    import tiktoken
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        total_tokens = 0
+        for msg in messages:
+            total_tokens += len(enc.encode(msg.get("content", "")))
+
+        print(f"   📊 Промпт: ~{total_tokens} токенов (лимит: {LLM_NUM_CTX})")
+
+        if total_tokens > LLM_NUM_CTX:
+            print(f"   ⚠️ ПЕРЕПОЛНЕНИЕ! Превышение на {total_tokens - LLM_NUM_CTX} токенов")
+    except Exception as e:
+        print(f"   ⚠️ Не удалось подсчитать токены: {e}")
+
+    # ... остальной код без изменений ...
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# РЕКОМЕНДАЦИЯ
+# ═══════════════════════════════════════════════════════════════
+
+# 1. СЕЙЧАС: Используйте Вариант 1 (быстрый фикс)
+#    Просто урежьте MAX_HISTORY и FAISS_MAX_CHARS в config.py
+#    Это даст мгновенный результат
+
+# 2. ПОТОМ: Внедрите Вариант 3 (context manager)
+#    Когда будет время, интегрируйте умную систему
+#    Это даст максимальное качество при лимите
+
+# ═══════════════════════════════════════════════════════════════
+# АЛЬТЕРНАТИВА: Увеличить контекст модели
+# ═══════════════════════════════════════════════════════════════
+
+# Если ваше железо позволяет, можно просто увеличить LLM_NUM_CTX:
+
+# В config.py:
+# LLM_NUM_CTX = 16384  # было 8192
+
+# ⚠️ НО: это сильно замедлит генерацию!
+# RTX 3060 Ti справится, но будет медленнее в 2-3 раза
+
+# Для моделей Q4_K_M:
+# - 8k контекст: ~3-5 сек на ответ
+# - 16k контекст: ~6-10 сек на ответ
+# - 32k контекст: ~12-20 сек на ответ
+
+# ═══════════════════════════════════════════════════════════════
+# МОНИТОРИНГ: Следите за токенами
+# ═══════════════════════════════════════════════════════════════
+
+# Создайте простой скрипт для проверки:
+"""
+# test_context_size.py
+from lada.core.context_manager import optimize_prompt_context
+
+result = optimize_prompt_context(
+    user_id=123,
+    message="Тестовое сообщение",
+    max_tokens=8192,
+)
+
+print(f"Оценка токенов: {result['estimated_tokens']}")
+print(f"История: {result['max_history']} сообщений")
+print(f"FAISS: {result['faiss_max_chars']} символов")
+print(f"Модули: {len(result['enabled_modules'])}")
+
+if result['estimated_tokens'] > 8192:
+    print("⚠️ ПЕРЕПОЛНЕНИЕ!")
+else:
+    print("✅ Влезает в лимит")
+"""

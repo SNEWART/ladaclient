@@ -1,0 +1,269 @@
+# config.py — настройки агента
+
+API_ID = 35428945
+API_HASH = "d800c34b98a39b3907833c0648573c7a"
+OWNER_ID = 1903274905
+
+# ─────── МОДЕЛИ ───────
+MODEL = "igorls/gemma-4-E4B-it-heretic-GGUF:Q4_K_M"
+VISION_MODEL = "huihui_ai/qwen2.5-vl-abliterated:7b"
+EMBEDDING_MODEL = "bge-m3"
+WHISPER_MODEL = "whisper-base"
+# ─────── LLM-ВАЛИДАТОР OBSERVATIONS ───────
+OBS_VALIDATOR_ENABLED = True
+OBS_VALIDATOR_MODEL = "huihui_ai/qwen2.5-abliterate:1.5b"
+
+# 🔴 ВАЖНО: Gemma 4 — думающая модель (think=True).
+#           Gemma 2 и большинство RP-моделей — НЕ думающие.
+# При смене модели на Gemma 2 / magnum / любую другую RP —
+# поставь False. Иначе Ollama будет молча игнорировать флаг,
+# но ты потеряешь время на retry при пустом content.
+MODEL_SUPPORTS_THINKING = True
+
+# ─────── SEARCH AGENT ───────
+SEARCH_AGENT_ENABLED = False
+SEARCH_AGENT_MODEL = "huihui_ai/qwen2.5-abliterate:1.5b"
+SEARCH_AGENT_MIN_MSG_LEN = 5
+
+# ─────── ПАРАМЕТРЫ ГЕНЕРАЦИИ ───────
+LLM_TEMPERATURE = 0.8
+LLM_NUM_PREDICT = 1000
+LLM_NUM_CTX = 8192
+
+LLM_JSON_NUM_PREDICT = 1500
+LLM_JSON_TEMPERATURE = 0.3
+
+# ─────── ОСНОВНЫЕ ───────
+REFLECTION_INTERVAL = 3600
+SHOW_RAW_EVENTS = False
+MAX_HISTORY = 30
+REPLY_TO_ALL = True
+COOLDOWN_SECONDS = 3
+IDLE_MINUTES = 5
+
+# ─────── FAISS ───────
+FAISS_TOP_K = 50
+FAISS_MIN_SCORE = 0.35
+FAISS_MAX_CHARS = 8000
+HNSW_M = 32
+HNSW_EF_CONSTRUCTION = 200
+HNSW_EF_SEARCH = 64
+EMBED_CACHE_SIZE = 512
+
+# ─────── ВЕБ-ПОИСК ───────
+WEB_SEARCH_ENABLED = True
+WEB_SEARCH_MAX_RESULTS = 5
+WEB_SEARCH_MAX_ROUNDS = 2
+
+# ─────── ЭМОЦИИ ───────
+EMOTION_ENABLED = True
+MOOD_NEGATIVE_MULTIPLIER = 1.7
+MOOD_POSITIVE_MULTIPLIER = 1.0
+
+# ─────── СТАТУСЫ ОТНОШЕНИЙ ───────
+STATUS_INTIMACY_LOVER = 0.70
+STATUS_INTIMACY_HUSBAND = 0.90
+GLOBAL_CAP_WHEN_TAKEN = 6
+
+# ─────── ПРЕДЛОЖЕНИЕ ОТНОШЕНИЙ ───────
+PROPOSAL_ENABLED = True
+PROPOSAL_REJECTION_COOLDOWN_DAYS = 30
+PROPOSAL_REJECTION_INTIMACY_PENALTY = 0.05
+PROPOSAL_REJECTION_SADNESS_DELTA = 8
+
+# ─────── СОН ───────
+SLEEP_INTERVAL_HOURS = 24
+SLEEP_DAYS_THRESHOLD = 1
+SLEEP_MIN_OLD = 10
+SLEEP_BACKUP_KEEP = 5
+
+# ─────── МОНОЛОГ ───────
+MONOLOGUE_ENABLED = True
+MONOLOGUE_INTERVAL_MINUTES = 45
+MONOLOGUE_FIRST_DELAY_MINUTES = 10
+MONOLOGUE_INJECT_RECENT_HOURS = 12
+MONOLOGUE_INJECT_MAX = 3
+
+# ─────── ИНИЦИАТИВА ───────
+INITIATIVE_ENABLED = True
+INITIATIVE_CHECK_INTERVAL_MINUTES = 60
+INITIATIVE_HOURS_SILENCE = 6.0
+INITIATIVE_CHANCE = 0.35
+INITIATIVE_TARGET = "all"
+INITIATIVE_USER_COOLDOWN_HOURS = 8
+
+# ─────── НОЧНОЕ ВРЕМЯ ───────
+NIGHT_START_HOUR = 23
+NIGHT_END_HOUR = 8
+NIGHT_ASK_COOLDOWN_DAYS = 30
+NIGHT_ASK_WINDOW_START = 20
+NIGHT_ASK_WINDOW_END = 23
+
+# ─────── ОЧЕРЕДЬ ───────
+QUEUE_WORKER_COUNT = 1
+QUEUE_MAX_SIZE = 1000
+QUEUE_DEBOUNCE_SECS = 1.5
+
+# ─────── ВЕБ ───────
+WEB_PORT = 8080
+
+# ─────── ЛИЧНОСТЬ ───────
+PERSONA_DIR = "persona"
+
+# ─────── ФИЛЬТРЫ ОТВЕТА ───────
+STRIP_ECHO_ENABLED = True
+STRIP_ECHO_MAX_WORDS = 3
+STRIP_ECHO_MAX_LEN = 30
+
+# ─────── ЖИВОЙ ЧАТ ───────
+SPLIT_PROBABILITY = 0.5
+SPLIT_MAX_PARTS = 3
+SPLIT_MIN_LEN = 80
+SPLIT_TYPING_SPEED = 20
+SPLIT_MIN_DELAY = 0.7
+SPLIT_MAX_DELAY = 4.0
+SPLIT_BETWEEN_DELAY = 0.4
+
+# ─────── СТИКЕРЫ ───────
+STICKER_ENABLED = True
+STICKER_PROBABILITY = 0.15
+STICKER_PACK = "HotCherry"
+
+# ─────── СЛУЧАЙНЫЕ ФОТО ───────
+RANDOM_PHOTO_ENABLED = True
+RANDOM_PHOTO_PROBABILITY = 0.0
+RANDOM_PHOTO_SCENES = []
+
+# ─────── TELEGRAM ПРОКСИ ───────
+TELEGRAM_PROXIES = [
+    ("146.66.180.10", 1443, "dd5a171693fa51f091fbcb91bfa8c0f697"),
+]
+TELEGRAM_ALLOW_DIRECT = True
+TELEGRAM_PROXY_CHECK_TIMEOUT = 3
+
+# ─────── ЛОГИ ───────
+LOG_RETENTION_DAYS = 14
+
+# ─────── MEMORY REACTOR ───────
+MEMORY_REACTOR_ENABLED = True
+MEMORY_REACTOR_INTERVAL_MINUTES = 45
+MEMORY_REACTOR_MOOD_DELTA_MAX = 1.0
+MEMORY_REACTOR_SINS_DELTA_MAX = 1.0
+
+# ─────── CONTEXT TRACKERS ───────
+# A1: о чём сейчас диалог (focus) + тон диалога
+TOPIC_TRACKER_ENABLED = True
+TOPIC_TRACKER_EVERY_N = 5           # раз в N сообщений обновлять фокус
+
+# A2: история тем за последние часы (из того же A1)
+RECENT_TOPICS_MAX = 5               # сколько тем держать в истории
+RECENT_TOPICS_TTL_MIN = 120         # через сколько минут тема «стареет»
+
+# A3: обещания
+PROMISE_TRACKER_ENABLED = True
+PROMISE_CHECK_EVERY_N = 2           # раз в N ответов Лады проверять «обещала ли»
+PROMISE_STALE_HOURS = 24            # сколько часов висеть невыполненному
+
+# A4: ситуативное настроение в диалоге
+SITUATIONAL_MOOD_ENABLED = True
+SITUATIONAL_MOOD_EVERY_N = 3        # раз в N сообщений пересчитывать
+
+# ─────── SELF-CONSISTENCY (B1) ───────
+SELF_CONSISTENCY_ENABLED = True
+SELF_CONSISTENCY_INTERVAL_HOURS = 24
+SELF_CONSISTENCY_MIN_REPLIES = 30     # минимум её реплик для анализа
+SELF_CONSISTENCY_LOOKBACK = 80        # сколько её реплик брать
+
+# ─────── COMPANION MODEL (B3+B4) ───────
+COMPANION_MODEL_ENABLED = True
+COMPANION_MODEL_EVERY_N = 4           # раз в N её ответов
+
+# ─────── EMOTIONAL INERTIA (C4) ───────
+EMOTIONAL_INERTIA_ENABLED = True
+# Если настроение прыгнуло сильно (delta valence > threshold),
+# новые резкие скачки в обратную сторону тормозятся N часов.
+INERTIA_VALENCE_THRESHOLD = 1.2
+INERTIA_HOLD_HOURS = 3.0
+# Чем дольше держится негатив — тем медленнее восстанавливается
+INERTIA_NEGATIVE_BONUS = 1.5
+
+# ─────── STATE VECTOR (C2) ───────
+STATE_VECTOR_ENABLED = True
+STATE_VECTOR_UPDATE_EVERY_N = 3
+
+# ─────── LIFE LOG (собственная жизнь Лады) ───────
+# Раз в N часов LLM придумывает событие, которое с ней произошло
+# вне чата. Событие влияет на mood, живёт TTL часов, попадает в промпт.
+LIFE_LOG_ENABLED = True
+LIFE_LOG_INTERVAL_HOURS = 4
+LIFE_LOG_MAX_ACTIVE = 20
+LIFE_LOG_TTL_HOURS = 72
+LIFE_LOG_MOOD_INFLUENCE = 0.15   # насколько valence события сдвигает mood (0..1)
+
+# ─────── SELF-CHECK (второй проход, только при подозрении) ───────
+# Модель иногда «плывёт»: длинные монологи, echo вопроса, ответы
+# не по тону, ремарки. Вместо переписывания всего всегда — вызываем
+# второй проход ТОЛЬКО если сработал триггер. В 90% случаев 0 сек.
+SELF_CHECK_ENABLED = True
+SELF_CHECK_MAX_REPLY_LEN = 700    # если ответ длиннее — триггер
+
+# ─────── SILENCE REACTION (реакция на молчание) ───────
+# Когда он давно не писал, Лада по возвращении должна это замечать:
+# не молчать, не делать вид, что ничего не было. Тон зависит от
+# длительности и близости.
+SILENCE_REACTION_ENABLED = True
+SILENCE_HOURS_STAGE1 = 8      # «сутки не виделись»
+SILENCE_HOURS_STAGE2 = 26     # «больше суток»
+SILENCE_HOURS_STAGE3 = 72     # «несколько дней»
+SILENCE_HOURS_STAGE4 = 168    # «неделя и больше»
+
+# ─────── EMOTIONAL PEAKS (пережёвывание) ───────
+# Раз в N часов Лада перебирает самые яркие моменты за последние
+# сутки-двое. Не как дневник, а как эмоциональный отклик:
+# «вот это меня до сих пор не отпускает». Влияет на sins/mood,
+# попадает в промпт как «что у неё на душе».
+EMOTIONAL_PEAKS_ENABLED = True
+EMOTIONAL_PEAKS_INTERVAL_HOURS = 24
+EMOTIONAL_PEAKS_LOOKBACK_HOURS = 48
+EMOTIONAL_PEAKS_MIN_ITEMS = 3
+EMOTIONAL_PEAKS_SINS_DELTA_MAX = 1.0
+
+# ─────── COMPANION STYLE (обучение стилю собеседника) ───────
+# Лада подмечает, КАК говорит собеседник: лексика, манера, шутки,
+# избегаемые темы. Хранится отдельно от companion_model (тот про
+# состояние и тон). Обновляется раз в N её ответов.
+COMPANION_STYLE_ENABLED = True
+COMPANION_STYLE_EVERY_N = 8     # раз в N ответов Лады обновлять
+COMPANION_STYLE_LOOKBACK = 30   # сколько его реплик брать для анализа
+
+# ─────── RELATION GROWTH (медленный рост trust/intimacy) ───────
+# Trust и intimacy растут по кривой знакомства: сначала быстрее,
+# потом всё медленнее. Дневной лимит жёсткий. До 1.0 — месяцы.
+RELATION_GROWTH_ENABLED = True
+TRUST_DAILY_CAP = 0.02           # максимум +0.02 trust в сутки
+INTIMACY_DAILY_CAP = 0.01        # максимум +0.01 intimacy в сутки
+INTIMACY_TRUST_GATE = 0.45       # ниже этого trust intimacy не растёт вообще
+
+EMBEDDING_NUM_CTX = 1024
+
+# ─────── UNIFIED ANALYSIS (один вызов вместо шести) ───────
+UNIFIED_ANALYSIS_ENABLED = True
+OBS_VALIDATOR_ENABLED = False  # отключён, чтобы не грузить qwen 1.5b и не выгружать Gemma
+
+# ─────── INITIATIVE (динамическая, с отложенной отправкой) ───────
+INITIATIVE_ENABLED = True
+INITIATIVE_CHECK_INTERVAL_MINUTES = 90
+INITIATIVE_HOURS_SILENCE = 6.0
+INITIATIVE_BASE_CHANCE = 0.15
+INITIATIVE_USER_COOLDOWN_HOURS = 8
+INITIATIVE_MAX_ATTEMPTS = 3
+INITIATIVE_RESET_AFTER_DAYS = 7
+INITIATIVE_PENDING_REGEN_MAX = 2
+
+# ─────── PENDING (отложенная отправка) ───────
+PENDING_SCHEDULE_BASE_HOUR = 8
+PENDING_SCHEDULE_GAUSS_MEAN_MIN = 90    # 8:00 + 90 мин = 9:30 (в среднем)
+PENDING_SCHEDULE_GAUSS_SIGMA_MIN = 60   # разброс
+PENDING_SCHEDULE_CLAMP_MIN = 0          # 8:00 (минимум)
+PENDING_SCHEDULE_CLAMP_MAX = 240        # 12:00 (максимум)
+INITIATIVE_PENDING_EXPIRE_HOURS = 36
