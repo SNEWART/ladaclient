@@ -68,12 +68,15 @@ async function cmdRun(actionId) {
                 (r.output || '(пусто)') +
                 `\n\n[exit=${r.exit_code}, время=${r.duration}с]`;
             out.classList.add(r.ok ? 'ok' : 'err');
+            // FIX: скролл вниз, чтобы видеть конец длинного вывода
+            out.scrollTop = out.scrollHeight;
         }
         if (title) title.textContent = r.ok ? `✅ ${r.name}` : `❌ ${r.name}`;
     } catch (e) {
         if (out) {
             out.textContent = `❌ Ошибка: ${e.message}`;
             out.classList.add('err');
+            out.scrollTop = out.scrollHeight;
         }
         if (title) title.textContent = '❌ Ошибка';
     } finally {

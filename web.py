@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from config import MODEL, OWNER_ID
 from lada.core.persona import get_persona
-from lada.core.lancedb_memory import lance_mem as faiss_mem
+# FIX: переименовано faiss_mem → memory (это LanceDB, не FAISS)
+from lada.core.lancedb_memory import lance_mem as memory
 from lada.core.memory import (
     get_history, add_message, clear_history, list_users,
 )
@@ -50,8 +51,6 @@ if WEB_UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(WEB_UI_DIR)), name="ui")
 
 
-# ─────────────── Модели запросов ───────────────
-
 class ChatRequest(BaseModel):
     message: str
 
@@ -78,8 +77,6 @@ class SleepRequest(BaseModel):
     force: bool = False
 
 
-# ─────────────── UI ───────────────
-
 @app.get("/", response_class=HTMLResponse)
 async def index():
     f = WEB_UI_DIR / "index.html"
@@ -88,8 +85,6 @@ async def index():
     return "<h1>web_ui/index.html не найден</h1>"
 
 
-# ─────────────── Статус ───────────────
-
 @app.get("/api/status")
 async def status(_: bool = Depends(require_auth)):
     return {
@@ -97,13 +92,13 @@ async def status(_: bool = Depends(require_auth)):
         "mode": get_mode(),
         "persona_size": len(get_persona()),
         "faiss": {
-            "total": faiss_mem.count(),
-            "emotion": faiss_mem.count_by_category("emotion", VIEW_USER_ID),
-            "observation": faiss_mem.count_by_category("observation", VIEW_USER_ID),
-            "reflection": faiss_mem.count_by_category("reflection", None),
-            "monologue": faiss_mem.count_by_category("monologue", None),
+            "total": memory.count(),
+            "emotion": memory.count_by_category("emotion", VIEW_USER_ID),
+            "observation": memory.count_by_category("observation", VIEW_USER_ID),
+            "reflection": memory.count_by_category("reflection", None),
+            "monologue": memory.count_by_category("monologue", None),
         },
-        "users": faiss_mem.list_users(),
+        "users": memory.list_users(),
         "mood": mood.get_mood(),
         "time": datetime.now().strftime("%H:%M:%S"),
     }
@@ -114,11 +109,9 @@ async def soul(_: bool = Depends(require_auth)):
     return {"mood": mood.get_mood(), "sins": sins.get_state()}
 
 
-# ─────────────── Мысли / Рефлексии ───────────────
-
 @app.get("/api/thoughts")
 async def thoughts(_: bool = Depends(require_auth)):
-    items = [m for m in faiss_mem.metadata if m.get("category") == "monologue"][-20:]
+    items = [m for m in memory.metadata if m.get("category") == "monologue"][-20:]
     items.reverse()
     return [
         {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
@@ -128,7 +121,7 @@ async def thoughts(_: bool = Depends(require_auth)):
 
 @app.get("/api/reflections")
 async def reflections(_: bool = Depends(require_auth)):
-    items = [m for m in faiss_mem.metadata if m.get("category") == "reflection"][-20:]
+    items = [m for m in memory.metadata if m.get("category") == "reflection"][-20:]
     items.reverse()
     return [
         {"text": m["text"], "timestamp": m.get("timestamp", "")[:19].replace("T", " ")}
@@ -139,7 +132,7 @@ async def reflections(_: bool = Depends(require_auth)):
 @app.get("/api/observations")
 async def observations(_: bool = Depends(require_auth)):
     items = [
-        m for m in faiss_mem.metadata
+        m for m in memory.metadata
         if m.get("category") == "observation" and m.get("user_id") == VIEW_USER_ID
     ][-50:]
     items.reverse()
@@ -150,8 +143,6 @@ async def observations(_: bool = Depends(require_auth)):
     ]
 
 
-# ─────────────── Режим ───────────────
-
 @app.post("/api/mode")
 async def mode_set(req: ModeRequest, _: bool = Depends(require_auth)):
     if req.mode not in ("all", "owner"):
@@ -159,8 +150,6 @@ async def mode_set(req: ModeRequest, _: bool = Depends(require_auth)):
     set_mode(req.mode)
     return {"ok": True, "mode": req.mode}
 
-
-# ─────────────── Ручные действия ───────────────
 
 @app.post("/api/think")
 async def do_think(_: bool = Depends(require_auth)):
@@ -182,8 +171,6 @@ async def do_sleep(req: SleepRequest | None = None,
     return {"result": result, "forced": force}
 
 
-# ─────────────── Очередь ───────────────
-
 @app.get("/api/queue")
 async def queue_list(_: bool = Depends(require_auth)):
     return {"size": message_queue.size(), "items": message_queue.snapshot()}
@@ -203,14 +190,10 @@ async def queue_clear(_: bool = Depends(require_auth)):
     return {"ok": True, "removed": n}
 
 
-# ─────────────── Имена пользователей ───────────────
-
 @app.get("/api/users_names")
 async def users_names_api(_: bool = Depends(require_auth)):
     return users_names.all_names()
 
-
-# ─────────────── Доверие ───────────────
 
 @app.get("/api/trust")
 async def trust_list(_: bool = Depends(require_auth)):
@@ -267,8 +250,6 @@ async def trust_levels(_: bool = Depends(require_auth)):
     }
 
 
-# ─────────────── Список пользователей ───────────────
-
 @app.get("/api/users/list")
 async def users_list(_: bool = Depends(require_auth)):
     from lada.brain.relationship import (
@@ -278,15 +259,15 @@ async def users_list(_: bool = Depends(require_auth)):
     for uid in list_users():
         history = get_history(uid)
         obs_count = sum(
-            1 for m in faiss_mem.metadata
+            1 for m in memory.metadata
             if m.get("category") == "observation" and m.get("user_id") == uid
         )
         emo_count = sum(
-            1 for m in faiss_mem.metadata
+            1 for m in memory.metadata
             if m.get("category") == "emotion" and m.get("user_id") == uid
         )
         img_count = sum(
-            1 for m in faiss_mem.metadata
+            1 for m in memory.metadata
             if m.get("category") == "image" and m.get("user_id") == uid
         )
         last_time = ""
@@ -312,8 +293,6 @@ async def users_list(_: bool = Depends(require_auth)):
     result.sort(key=lambda x: x["last_time"] or "", reverse=True)
     return result
 
-
-# ─────────────── Профиль пользователя ───────────────
 
 @app.get("/api/user/{user_id}/profile")
 async def user_profile(user_id: int, _: bool = Depends(require_auth)):
@@ -346,7 +325,7 @@ async def user_profile(user_id: int, _: bool = Depends(require_auth)):
                 "text": m.get("text", ""),
                 "timestamp": (m.get("timestamp", "") or "")[:19].replace("T", " "),
             }
-            for m in faiss_mem.metadata
+            for m in memory.metadata
             if m.get("category") == category and m.get("user_id") == user_id
         ]
         items.reverse()
@@ -377,8 +356,6 @@ async def user_profile(user_id: int, _: bool = Depends(require_auth)):
 
     return profile
 
-
-# ─────────────── Переписки ───────────────
 
 @app.get("/api/dialogs")
 async def dialogs_list(_: bool = Depends(require_auth)):
@@ -422,8 +399,6 @@ async def dialog_clear(user_id: int, _: bool = Depends(require_auth)):
     return {"ok": True}
 
 
-# ─────────────── Веб-чат ───────────────
-
 @app.post("/api/chat")
 async def chat(req: ChatRequest, _: bool = Depends(require_auth)):
     message = req.message.strip()
@@ -434,7 +409,7 @@ async def chat(req: ChatRequest, _: bool = Depends(require_auth)):
     add_message(uid, "user", message, max_history=20)
     history = get_history(uid, limit=20)
 
-    related = faiss_mem.search(message, k=5, user_id=uid)
+    related = memory.search(message, k=5, user_id=uid)
     related = [r for r in related if r.get("category") != "emotion"][:5]
     if related:
         kt = "\n".join(f"- {k['text'][:200]}" for k in related)
@@ -461,8 +436,6 @@ async def chat_clear(_: bool = Depends(require_auth)):
     clear_history(WEB_CHAT_USER_ID)
     return {"ok": True}
 
-
-# ─────────────── Генерированные фото ───────────────
 
 @app.get("/api/images")
 async def list_images(_: bool = Depends(require_auth)):

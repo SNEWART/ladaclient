@@ -1,6 +1,11 @@
 // trust.js — ручное управление trust, intimacy, статусом и оверрайдом
+// FIX: переименованы LEVEL_LABELS_SHORT и STATUS_LABELS, потому что
+// в user_profile.js уже есть константы с теми же именами — при
+// загрузке обоих скриптов падало с SyntaxError.
+// FIX: setUserStatus переименован в trustSetUserStatus — в
+// user_profile.js есть глобальная setUserStatus.
 
-const LEVEL_LABELS_SHORT = {
+const TRUST_LEVEL_LABELS = {
     0: "обычное селфи",
     1: "домашнее",
     2: "расслабленное",
@@ -13,7 +18,7 @@ const LEVEL_LABELS_SHORT = {
     9: "NSFW",
 };
 
-const STATUS_LABELS = {
+const TRUST_STATUS_LABELS = {
     neutral: "Никто",
     acquaintance: "Знакомый",
     lover: "Любовник",
@@ -51,8 +56,8 @@ async function loadTrusts() {
 
 function renderTrustItem(it) {
     const eff = (it.effective_max !== undefined) ? it.effective_max : it.max_level;
-    const effLabel = LEVEL_LABELS_SHORT[eff] || "—";
-    const baseLabel = LEVEL_LABELS_SHORT[it.max_level] || "—";
+    const effLabel = TRUST_LEVEL_LABELS[eff] || "—";
+    const baseLabel = TRUST_LEVEL_LABELS[it.max_level] || "—";
     const trustFixed = it.trust.toFixed(2);
     const intFixed = it.intimacy.toFixed(2);
     const famFixed = it.familiarity.toFixed(2);
@@ -65,7 +70,7 @@ function renderTrustItem(it) {
     const currentStatus = it.status || "neutral";
     const pending = it.pending;
     const pendingBadge = pending
-        ? `<span class="badge-pending">💗 ждёт ответа: ${STATUS_LABELS[pending] || pending}</span>`
+        ? `<span class="badge-pending">💗 ждёт ответа: ${TRUST_STATUS_LABELS[pending] || pending}</span>`
         : "";
 
     const overrideLabel = overrideSet
@@ -74,8 +79,8 @@ function renderTrustItem(it) {
 
     const statusButtons = ["neutral", "acquaintance", "lover", "husband"].map(s => {
         const active = currentStatus === s ? "active" : "";
-        const label = STATUS_LABELS[s];
-        return `<button class="status-btn ${active}" onclick="setUserStatus(${it.user_id}, '${s}')">${label}</button>`;
+        const label = TRUST_STATUS_LABELS[s];
+        return `<button class="status-btn ${active}" onclick="trustSetUserStatus(${it.user_id}, '${s}')">${label}</button>`;
     }).join("");
 
     return `
@@ -142,7 +147,7 @@ function renderTrustItem(it) {
                        id="ovr-input-${it.user_id}"
                        min="-1" max="9" step="1"
                        value="${overrideSet ? override : -1}"
-                       oninput="updateOverrideLabel(${it.user_id}, this.value)">
+                       oninput="trustUpdateOverrideLabel(${it.user_id}, this.value)">
                 <span class="range-val" id="ovr-range-${it.user_id}">${overrideLabel}</span>
                 <button class="btn small" onclick="clearOverride(${it.user_id})">auto</button>
             </div>
@@ -160,7 +165,7 @@ function updateTrustLabel(uid, kind, value) {
     if (rangeEl) rangeEl.textContent = v;
 }
 
-function updateOverrideLabel(uid, value) {
+function trustUpdateOverrideLabel(uid, value) {
     const v = parseInt(value);
     const el = document.getElementById(`ovr-range-${uid}`);
     if (!el) return;
@@ -221,7 +226,8 @@ async function clearOverride(uid) {
     }
 }
 
-async function setUserStatus(uid, status) {
+// FIX: переименовано из setUserStatus (конфликт с user_profile.js)
+async function trustSetUserStatus(uid, status) {
     try {
         await api('/api/trust/status', {
             method: 'POST',

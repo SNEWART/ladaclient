@@ -21,6 +21,18 @@ if "%PY_EXE%"=="" (
 echo Использую Python: %PY_EXE%
 "%PY_EXE%" -c "import sys; print('  python:', sys.executable); print('  version:', sys.version.split()[0])"
 
+REM ─── FIX: проверяем наличие файлов проекта ───
+if not exist "run.py" (
+    echo [ERROR] run.py не найден в %CD%
+    pause
+    exit /b 1
+)
+if not exist "main.py" (
+    echo [ERROR] main.py не найден в %CD%
+    pause
+    exit /b 1
+)
+
 REM ─── Проверка зависимостей ───
 "%PY_EXE%" -c "from watchdog.observers import Observer" 2>nul
 if errorlevel 1 (

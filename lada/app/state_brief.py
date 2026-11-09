@@ -1,8 +1,4 @@
 # state_brief.py — сборка текстового состояния Лады для LLM.
-#
-# Разделён на ДВЕ функции:
-#   build_facts_brief() — факты + память + контекст диалога. В НАЧАЛО промпта.
-#   build_style_brief() — как отвечать. В КОНЕЦ промпта.
 
 import re
 import json
@@ -37,7 +33,6 @@ def _get_mood_valence() -> float:
 
 
 def _he_worries_you_are_gone(msg: str) -> bool:
-    """Он спрашивает, где Лада / почему пропала."""
     if not msg:
         return False
     low = msg.lower()
@@ -50,12 +45,12 @@ def _he_worries_you_are_gone(msg: str) -> bool:
     return any(t in low for t in triggers)
 
 
+# FIX: убран параметр user_requested_photo — он тут не использовался.
 def build_facts_brief(
     user_id: int,
     message: str,
     user_display: str,
     current_msg_count: int,
-    user_requested_photo: bool,
 ) -> str:
     lines = []
 
@@ -63,7 +58,6 @@ def build_facts_brief(
     lines.append("Все сообщения выше — от него. Не путай с другими.")
     lines.append("")
 
-    # Контекст диалога
     try:
         focus_block = topic_tracker.as_context_block(user_id)
         if focus_block:
@@ -123,7 +117,6 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Модуль 6: стиль собеседника
     try:
         from lada.brain import companion_style
         style_block = companion_style.as_context_block(user_id)
@@ -133,19 +126,16 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Список знакомств
     contacts_block = build_contacts_block(user_id)
     if contacts_block:
         lines.append(contacts_block)
         lines.append("")
 
-    # Рабочая память
     wm = wm_block(user_id)
     if wm:
         lines.append(wm)
         lines.append("")
 
-    # B1: устойчивые позиции
     try:
         from lada.brain import self_consistency
         self_block = self_consistency.as_context_block()
@@ -155,7 +145,6 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Модуль 1: собственные события Лады за последние часы
     try:
         from lada.brain import life_log
         life_block = life_log.as_context_block()
@@ -165,7 +154,6 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Модуль 4: реакция на длительное молчание
     try:
         from lada.brain import silence_reaction
         silence_block = silence_reaction.as_context_block(user_id)
@@ -175,7 +163,6 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Модуль 5: что у неё на душе (пики)
     try:
         from lada.brain import emotional_peaks
         peaks_block = emotional_peaks.as_context_block(hours=36)
@@ -185,7 +172,6 @@ def build_facts_brief(
     except Exception:
         pass
 
-    # Текущее состояние
     lines.append("=== ТВОЁ ТЕКУЩЕЕ СОСТОЯНИЕ ===")
     m = mood.get_mood()
     mv = _get_mood_valence()
@@ -199,7 +185,6 @@ def build_facts_brief(
     if sd:
         lines.append(sd)
 
-    # Погода
     city = user_city.get_city(user_id)
     if city:
         w = weather.get_weather(city)
@@ -214,7 +199,6 @@ def build_facts_brief(
         else:
             lines.append(f"Город: {city}. Данные недоступны. Не выдумывай.")
 
-    # Отношения
     trust = ip.get_trust(user_id)
     intimacy = ip.get_intimacy(user_id)
     eff_max = ip.effective_max_level(user_id)
@@ -273,7 +257,6 @@ def build_facts_brief(
             "Если согласится — [PROPOSE:night] в конце."
         )
 
-    # Сообщение
     lines.append("")
     lines.append("=== СООБЩЕНИЕ ===")
     lines.append(f"«{message[:400]}»")
@@ -321,7 +304,6 @@ def build_style_brief(
         lines.append("⚠️ " + boundary.replace("\n", " "))
         lines.append("")
 
-    # Он спрашивает, где Лада — не молчать
     if _he_worries_you_are_gone(message):
         lines.append(
             "🔴 ОН СПРАШИВАЕТ, ГДЕ ТЫ / ПОЧЕМУ ПРОПАЛА. "
@@ -350,6 +332,15 @@ def build_style_brief(
         lines.append("🔥 ПРОСЯТ ФОТО — пиши маркер [IMAGE] hint: <сцена>.")
         lines.append("Уровень = уровень сцены разговора.")
 
+    # FIX: явное указание про Мусю.
+    low = (message or "").lower()
+    if any(w in low for w in ("мус", "кошк", "кот")):
+        lines.append("")
+        lines.append(
+            "🐱 Просят Мусю/кошку — пиши [IMAGE] pet: <сцена с кошкой>. "
+            "Это ТВОЯ кошка, не пользователя."
+        )
+
     lines.append("")
     lines.append("МАРКЕРЫ: [IMAGE] [STICKER] [SEARCH] [REMEMBER] [SILENCE] "
                  "[PROPOSE:lover|husband|night].")
@@ -362,7 +353,7 @@ def build_state_brief(user_id, message, user_display,
     return {
         "facts": build_facts_brief(
             user_id, message, user_display,
-            current_msg_count, user_requested_photo,
+            current_msg_count,
         ),
         "style": build_style_brief(
             user_id, message,

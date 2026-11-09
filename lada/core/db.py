@@ -214,6 +214,29 @@ def init_db():
         last_attempt  TEXT,
         last_answered TEXT
     );
+
+    -- FIX: индексы по user_id для часто читаемых таблиц.
+    -- Раньше их не было — при росте базы выборки становились линейными.
+    CREATE INDEX IF NOT EXISTS idx_user_state_user
+        ON user_state(user_id);
+    CREATE INDEX IF NOT EXISTS idx_cooldowns_user
+        ON cooldowns(user_id);
+    CREATE INDEX IF NOT EXISTS idx_photo_history_user
+        ON photo_history(user_id);
+    CREATE INDEX IF NOT EXISTS idx_working_memory_user
+        ON working_memory(user_id);
+    CREATE INDEX IF NOT EXISTS idx_initiative_attempts_user
+        ON initiative_attempts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_companion_styles_user
+        ON companion_styles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_activity_user
+        ON user_activity(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_initiative_user
+        ON user_initiative(user_id);
+    CREATE INDEX IF NOT EXISTS idx_unread_meta_user
+        ON unread_meta(user_id);
+    CREATE INDEX IF NOT EXISTS idx_pending_initiatives_user
+        ON pending_initiatives(user_id);
     """)
 
     # Виртуальный "юзер" для глобальных таблиц

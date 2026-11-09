@@ -28,12 +28,12 @@ LEVEL_KEYWORDS = {
         "nude", "naked", "topless", "bottomless", "nsfw", "explicit",
         "sex", "sexy", "genitals", "pussy", "dick", "cock", "cum",
         "orgasm", "nipples", "areola", "completely naked", "naked skin",
-        "without clothes", "undressed", "without clothes",
+        "without clothes", "undressed",
         "naked breasts", "naked ass", "naked body",
-        "naked", "naked", "naked", "naked", "without clothes", "without underwear",
-        "nudity", "nudity", "boobs", "bare breasts", "barefoot", "undressed", "cums",
-        "in mouth", "in hand", "hand on", "vagina", "sucks", "on dick", "dick face",
-        "dick vagina", "smooth", "wet", "in cum",
+        "without underwear",
+        "nudity", "boobs", "bare breasts", "barefoot",
+        "in mouth", "in hand", "hand on", "vagina", "sucks", "on dick",
+        "dick face", "dick vagina", "smooth", "wet", "in cum",
     ],
     8: [
         "erotic", "seductive", "sensual", "provocative pose",
@@ -263,8 +263,28 @@ def effective_max_level(user_id: int) -> int:
     return max(0, min(9, effective))
 
 
+# FIX: раньше всегда возвращало False. Теперь распознаёт явные
+# русскоязычные запросы NSFW-контента. Используется в handlers.py
+# при вызове check_allowed().
+_NSFW_REQUEST_MARKERS = [
+    "покажи сиськи", "покажи грудь", "покажи груди",
+    "покажи киску", "покажи письку", "покажи вагину",
+    "покажи попу", "покажи задницу", "покажи тело",
+    "покажи голой", "покажи голую", "покажи голое",
+    "скинь голое", "скинь голую", "пришли голое",
+    "фото голой", "фото без одежды", "фото без белья",
+    "голая", "голое фото", "голышом",
+    "без одежды", "без белья", "без трусиков", "без лифчика",
+    "nude", "naked", "topless", "bottomless", "nsfw",
+    "explicit", "without clothes", "without underwear",
+]
+
+
 def is_explicit_nsfw_request(message: str) -> bool:
-    return False
+    if not message:
+        return False
+    low = message.lower()
+    return any(m in low for m in _NSFW_REQUEST_MARKERS)
 
 
 def check_allowed(user_id: int, scene: str, source: str = "chat",

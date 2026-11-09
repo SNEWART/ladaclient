@@ -1,9 +1,6 @@
-# lada/app/state_brief_optimized.py — Оптимизированная сборка контекста с ленивой загрузкой
-#
-# РЕВОЛЮЦИЯ: вместо вызова всех модулей каждый раз, используем ленивую
-# загрузку и кэширование. Модули пересчитываются только при изменении данных.
-#
-# Результат: ~70% меньше вычислений, ~50% быстрее генерация
+# lada/app/state_brief_optimized.py — Оптимизированная сборка контекста
+# с ленивой загрузкой. FIX: убран неиспользуемый user_requested_photo
+# из build_facts_brief_optimized, добавлена подсказка про Мусю.
 
 import json
 from lada.core.db import get_conn
@@ -23,7 +20,6 @@ from lada.brain.relationship import (
 from lada.app.utils import has_asterisk_actions, asks_for_monologue
 
 
-# Примерная стоимость каждого модуля в токенах (для бюджета)
 MODULE_COSTS = {
     "topic_tracker": 150,
     "recent_topics": 120,
@@ -46,7 +42,6 @@ MODULE_COSTS = {
 
 
 def _get_mood_valence() -> float:
-    """Быстрое чтение valence из БД."""
     conn = get_conn()
     row = conn.execute(
         "SELECT value FROM lada_state WHERE key = 'mood_valence'"
@@ -61,7 +56,6 @@ def _get_mood_valence() -> float:
 
 
 def _he_worries_you_are_gone(msg: str) -> bool:
-    """Он спрашивает, где Лада / почему пропала."""
     if not msg:
         return False
     low = msg.lower()
@@ -79,13 +73,7 @@ def build_facts_brief_optimized(
     message: str,
     user_display: str,
     current_msg_count: int,
-    user_requested_photo: bool,
 ) -> str:
-    """
-    Оптимизированная версия build_facts_brief с ленивой загрузкой.
-
-    Модули загружаются из кэша или вычисляются только при необходимости.
-    """
     lines = []
     mgr = get_lazy_context_manager()
 
@@ -93,9 +81,6 @@ def build_facts_brief_optimized(
     lines.append("Все сообщения выше — от него. Не путай с другими.")
     lines.append("")
 
-    # ─────────────── КОНТЕКСТ ДИАЛОГА (быстро меняющиеся) ───────────────
-
-    # Topic tracker (TTL: 1 мин)
     def compute_topic_tracker():
         from lada.brain import topic_tracker
         return topic_tracker.as_context_block(user_id)
@@ -111,7 +96,6 @@ def build_facts_brief_optimized(
         lines.append(topic_block)
         lines.append("")
 
-    # Recent topics (TTL: 3 мин)
     def compute_recent_topics():
         from lada.brain import recent_topics
         return recent_topics.as_context_block(user_id)
@@ -127,7 +111,6 @@ def build_facts_brief_optimized(
         lines.append(recent_block)
         lines.append("")
 
-    # Situational mood (TTL: 2 мин)
     def compute_situational_mood():
         from lada.brain import situational_mood
         return situational_mood.as_context_block(user_id)
@@ -143,7 +126,6 @@ def build_facts_brief_optimized(
         lines.append(tone_block)
         lines.append("")
 
-    # Promise tracker (TTL: 5 мин)
     def compute_promise_tracker():
         from lada.brain import promise_tracker
         return promise_tracker.as_context_block(user_id)
@@ -159,9 +141,6 @@ def build_facts_brief_optimized(
         lines.append(promise_block)
         lines.append("")
 
-    # ─────────────── СОСТОЯНИЕ ЛАДЫ (средне меняющиеся) ───────────────
-
-    # Emotional inertia (TTL: 15 мин)
     def compute_emotional_inertia():
         from lada.brain import emotional_inertia
         return emotional_inertia.as_context_block()
@@ -177,7 +156,6 @@ def build_facts_brief_optimized(
         lines.append(inertia_block)
         lines.append("")
 
-    # State vector (TTL: 5 мин)
     def compute_state_vector():
         from lada.brain import state_vector
         return state_vector.as_context_block(user_id)
@@ -193,7 +171,6 @@ def build_facts_brief_optimized(
         lines.append(vec_block)
         lines.append("")
 
-    # Companion model (TTL: 5 мин)
     def compute_companion_model():
         from lada.brain import companion_model
         return companion_model.as_context_block(user_id)
@@ -209,7 +186,6 @@ def build_facts_brief_optimized(
         lines.append(companion_block)
         lines.append("")
 
-    # Companion style (TTL: 1 час, если включен)
     try:
         from config import COMPANION_STYLE_ENABLED
         if COMPANION_STYLE_ENABLED:
@@ -230,9 +206,6 @@ def build_facts_brief_optimized(
     except Exception:
         pass
 
-    # ─────────────── ЗНАКОМСТВА И ПАМЯТЬ (медленно меняющиеся) ───────────────
-
-    # Contacts (TTL: 30 мин)
     def compute_contacts():
         from lada.core.contacts import build_contacts_block
         return build_contacts_block(user_id)
@@ -248,7 +221,6 @@ def build_facts_brief_optimized(
         lines.append(contacts_block)
         lines.append("")
 
-    # Working memory (TTL: 10 мин)
     def compute_working_memory():
         from lada.core.working_memory import as_context_block as wm_block
         return wm_block(user_id)
@@ -264,9 +236,6 @@ def build_facts_brief_optimized(
         lines.append(wm)
         lines.append("")
 
-    # ─────────────── ДОЛГОСРОЧНЫЕ МОДУЛИ (редко меняющиеся) ───────────────
-
-    # Self-consistency (TTL: 2 часа, если включен)
     try:
         from config import SELF_CONSISTENCY_ENABLED
         if SELF_CONSISTENCY_ENABLED:
@@ -287,7 +256,6 @@ def build_facts_brief_optimized(
     except Exception:
         pass
 
-    # Life log (TTL: 30 мин, если включен)
     try:
         from config import LIFE_LOG_ENABLED
         if LIFE_LOG_ENABLED:
@@ -308,7 +276,6 @@ def build_facts_brief_optimized(
     except Exception:
         pass
 
-    # Silence reaction
     def compute_silence_reaction():
         from lada.brain import silence_reaction
         return silence_reaction.as_context_block(user_id)
@@ -324,7 +291,6 @@ def build_facts_brief_optimized(
         lines.append(silence_block)
         lines.append("")
 
-    # Emotional peaks (TTL: 1 час, если включен)
     try:
         from config import EMOTIONAL_PEAKS_ENABLED
         if EMOTIONAL_PEAKS_ENABLED:
@@ -345,8 +311,6 @@ def build_facts_brief_optimized(
     except Exception:
         pass
 
-    # ─────────────── ТЕКУЩЕЕ СОСТОЯНИЕ (всегда свежее) ───────────────
-
     lines.append("=== ТВОЁ ТЕКУЩЕЕ СОСТОЯНИЕ ===")
     m = mood.get_mood()
     mv = _get_mood_valence()
@@ -360,7 +324,6 @@ def build_facts_brief_optimized(
     if sd:
         lines.append(sd)
 
-    # Погода (TTL: 1 час)
     city = user_city.get_city(user_id)
     if city:
         def compute_weather():
@@ -385,8 +348,6 @@ def build_facts_brief_optimized(
         if weather_block:
             lines.append("")
             lines.append(weather_block)
-
-    # ─────────────── ОТНОШЕНИЯ (средне меняющиеся) ───────────────
 
     def compute_relations():
         trust = ip.get_trust(user_id)
@@ -460,8 +421,6 @@ def build_facts_brief_optimized(
         lines.append("")
         lines.append(relations_block)
 
-    # ─────────────── ТЕКУЩЕЕ СООБЩЕНИЕ ───────────────
-
     lines.append("")
     lines.append("=== СООБЩЕНИЕ ===")
     lines.append(f"«{message[:400]}»")
@@ -485,7 +444,6 @@ def build_style_brief(
     current_msg_count: int,
     user_requested_photo: bool,
 ) -> str:
-    """Стиль ответа — не кэшируется, всегда свежий."""
     lines = []
 
     lines.append("=== 🔴 КАК ТЫ ОТВЕЧАЕШЬ (это важнее всего выше) ===")
@@ -538,6 +496,15 @@ def build_style_brief(
         lines.append("🔥 ПРОСЯТ ФОТО — пиши маркер [IMAGE] hint: <сцена>.")
         lines.append("Уровень = уровень сцены разговора.")
 
+    # FIX: явное указание про Мусю — иначе модель генерит своё фото.
+    low = (message or "").lower()
+    if any(w in low for w in ("мус", "кошк", "кот")):
+        lines.append("")
+        lines.append(
+            "🐱 Просят Мусю/кошку — пиши [IMAGE] pet: <сцена с кошкой>. "
+            "Это ТВОЯ кошка, не пользователя."
+        )
+
     lines.append("")
     lines.append("МАРКЕРЫ: [IMAGE] [STICKER] [SEARCH] [REMEMBER] [SILENCE] "
                  "[PROPOSE:lover|husband|night].")
@@ -547,15 +514,10 @@ def build_style_brief(
 
 def build_state_brief_optimized(user_id, message, user_display,
                                   current_msg_count, user_requested_photo):
-    """
-    Оптимизированная версия build_state_brief.
-
-    Использует ленивую загрузку и кэширование модулей.
-    """
     return {
         "facts": build_facts_brief_optimized(
             user_id, message, user_display,
-            current_msg_count, user_requested_photo,
+            current_msg_count,
         ),
         "style": build_style_brief(
             user_id, message,

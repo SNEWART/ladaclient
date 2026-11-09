@@ -18,7 +18,6 @@ from lada.core.llm import ask, ask_text
 from lada.core.memory import get_history, add_message, add_silence_marker
 from lada.core.lancedb_memory import lance_mem as faiss_mem
 from lada.core import memory_search
-from lada.core.working_memory import update_for_dialog as wm_update
 from lada.brain import mood, image_policy, image_mood, will, relationship as rel
 from lada.brain import night_policy
 from lada.brain.relationship import (
@@ -28,6 +27,7 @@ from lada.brain.relationship import (
 from lada.brain.combined_eval import evaluate_and_update
 from lada.brain.initiative import touch_user_activity
 from lada.brain.monologue import get_recent_thoughts
+from lada.brain.self_check import rewrite_if_suspicious  # FIX: подключён
 from lada.telegram.mode import should_reply
 from lada.telegram.media_processor import process_media
 from lada.telegram.cooldown import is_allowed, touch
@@ -42,7 +42,8 @@ from lada.app.utils import (
     log, log_thinking, detect_yes_no,
     strip_asterisk_actions, strip_question_echo, strip_fake_notes,
 )
-from lada.app.state_brief import build_state_brief
+# FIX: переключено на оптимизированную сборку с ленивой загрузкой модулей
+from lada.app.state_brief_optimized import build_state_brief_optimized as build_state_brief
 from lada.app.commands import handle_owner_command
 
 
@@ -176,7 +177,6 @@ async def process_batch(batch: list):
     log(f"📥 Из очереди: {len(batch)} сообщ. от {user_display} "
         f"(осталось: {message_queue.size()})")
 
-    # Если он ответил — сбрасываем счётчик инициатив
     try:
         from lada.brain import initiative as _init
         _init.on_user_replied(user_id)
@@ -320,7 +320,6 @@ async def process_batch(batch: list):
         history = history + [{"role": "system", "content": brief["facts"]}]
     _style_brief = brief.get("style", "")
 
-    # Внедрение pending инициативы
     try:
         from lada.brain import pending as pending_mod
         pending_data = pending_mod.get_pending(user_id)
@@ -482,10 +481,8 @@ async def process_batch(batch: list):
                     )
                 except Exception as e:
                     log(f"   ⚠️ silent combined_eval: {e}")
-                try:
-                    await wm_update(user_id, combined, "[промолчала]", user_display)
-                except Exception as e:
-                    log(f"   ⚠️ silent WM: {e}")
+                # FIX: убран wm_update — WM уже обновляется внутри
+                # unified_analysis.analyze_and_apply (поле wm_update).
                 try:
                     from lada.app import post_response
                     await post_response.run(user_id, combined, "")
@@ -494,6 +491,19 @@ async def process_batch(batch: list):
 
             asyncio.create_task(_silent_processing())
             return
+
+    # FIX: второй проход — вызывается только при подозрительных
+    # признаках (длинный ответ, сработал regex, ярче настроения).
+    try:
+        reply, was_rewritten, reason = await rewrite_if_suspicious(
+            reply, combined, history,
+            had_regex_strip=was_stripped,
+            had_fake_strip=fake_stripped,
+        )
+        if was_rewritten:
+            log(f"   🪞 self_check переписал ({reason})")
+    except Exception as e:
+        log(f"   ⚠️ self_check упал: {e}")
 
     remember_matches = re.findall(
         r'\[REMEMBER\]\s*(.+?)(?=\n\[|\Z)', reply, re.DOTALL
@@ -621,11 +631,7 @@ async def process_batch(batch: list):
                         )
                     except Exception as e:
                         log(f"   ⚠️ silent combined_eval: {e}")
-                    try:
-                        await wm_update(user_id, combined, "[промолчала]",
-                                        user_display)
-                    except Exception as e:
-                        log(f"   ⚠️ silent WM: {e}")
+                    # FIX: wm_update убран, см. выше
                     try:
                         from lada.app import post_response
                         await post_response.run(user_id, combined, "")

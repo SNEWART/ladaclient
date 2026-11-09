@@ -54,13 +54,13 @@ function closeSidebar() {
     overlay.classList.remove('open');
 }
 
+// FIX: добавлены новые вкладки для подсветки активной кнопки
 const MAIN_TABS = new Set([
     'dashboard', 'soul', 'thoughts', 'reflections',
     'images', 'queue', 'users', 'persona', 'chat',
+    'trust', 'observations', 'dialogs',
 ]);
 
-
-// ─────────────── HASH-РОУТИНГ ───────────────
 
 function parseHash() {
     const raw = (window.location.hash || '').replace(/^#\/?/, '');
@@ -113,8 +113,6 @@ async function switchPage(name, params = {}) {
 }
 
 
-// ─────────────── HEADER / QUEUE ───────────────
-
 async function updateQueueBadge() {
     try {
         const q = await api('/api/queue');
@@ -142,8 +140,6 @@ async function refreshHeaderStatus() {
 }
 
 
-// ─────────────── LOGOUT ───────────────
-
 async function doLogout() {
     try {
         await api('/api/auth/logout', { method: 'POST' });
@@ -152,10 +148,7 @@ async function doLogout() {
 }
 
 
-// ─────────────── INIT ───────────────
-
 async function initApp() {
-    // 1. Проверяем сессию
     try {
         const r = await fetch('/api/auth/me', { credentials: 'same-origin' });
         if (r.status === 401) {
@@ -165,10 +158,8 @@ async function initApp() {
         const me = await r.json();
         _authEnabled = !!me.auth_enabled;
     } catch (e) {
-        // сеть упала — пробуем дальше
     }
 
-    // 2. Кнопка logout в сайдбаре, если авторизация включена
     if (_authEnabled) {
         const sidebar = document.getElementById('sidebar');
         if (sidebar && !document.getElementById('logout-btn')) {
@@ -182,7 +173,6 @@ async function initApp() {
         }
     }
 
-    // 3. Обычная инициализация
     document.querySelectorAll('.nav-btn').forEach(btn => {
         if (btn.id === 'logout-btn') return;
         btn.addEventListener('click', () => switchPage(btn.dataset.tab));

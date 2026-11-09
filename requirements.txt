@@ -5,9 +5,14 @@ telethon>=1.34
 ollama>=0.3
 
 # ─── Векторный поиск ───
-faiss-cpu>=1.8.0
 numpy>=1.26
 lancedb>=0.39
+
+# ─── Токенайзер для подсчёта контекста ───
+tiktoken>=0.7
+
+# ─── QR-код для входа в Telegram ───
+qrcode>=7.4
 
 # ─── Веб-панель ───
 fastapi>=0.115
@@ -17,7 +22,6 @@ python-multipart>=0.0.9
 
 # ─── SSH-терминал в веб-панели ───
 asyncssh>=2.14
-# websockets приходит вместе с uvicorn[standard]
 
 # ─── Супервизор ───
 watchdog>=4.0
